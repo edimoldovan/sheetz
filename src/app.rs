@@ -26,16 +26,16 @@ struct EditState {
     in_formula_bar: bool,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum Pending {
     New,
     Open,
+    OpenPath(PathBuf),
     Quit,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum RibbonTab {
-    File,
     Home,
     Sheet,
     Help,
@@ -63,6 +63,25 @@ pub struct SheetzApp {
     status: String,
     last_title: String,
     ribbon_tab: RibbonTab,
+    backstage: bool,
+    recent: Vec<PathBuf>,
+}
+
+fn recent_file() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/sheetz/recent.txt"))
+}
+
+fn load_recent() -> Vec<PathBuf> {
+    let Some(path) = recent_file() else {
+        return Vec::new();
+    };
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .take(10)
+        .collect()
 }
 
 impl SheetzApp {
@@ -96,6 +115,8 @@ impl SheetzApp {
             status,
             last_title: String::new(),
             ribbon_tab: RibbonTab::Home,
+            backstage: false,
+            recent: load_recent(),
         };
         app.reset_view();
         app
@@ -391,13 +412,25 @@ impl SheetzApp {
         }
     }
 
-    fn do_open(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Excel workbook", &["xlsx"])
-            .pick_file()
-        else {
-            return;
-        };
+    fn push_recent(&mut self, path: &std::path::Path) {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        self.recent.retain(|p| *p != path);
+        self.recent.insert(0, path);
+        self.recent.truncate(10);
+        if let Some(file) = recent_file() {
+            if let Some(dir) = file.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let text: String = self
+                .recent
+                .iter()
+                .map(|p| format!("{}\n", p.display()))
+                .collect();
+            let _ = std::fs::write(file, text);
+        }
+    }
+
+    fn open_path(&mut self, path: PathBuf) {
         match Engine::open(&path) {
             Ok(engine) => {
                 self.engine = engine;
@@ -408,8 +441,18 @@ impl SheetzApp {
                 self.edit = None;
                 self.reset_view();
                 self.status = format!("Opened {}", path.display());
+                self.push_recent(&path);
             }
             Err(e) => self.status = format!("Could not open {}: {e}", path.display()),
+        }
+    }
+
+    fn do_open(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Excel workbook", &["xlsx"])
+            .pick_file()
+        {
+            self.open_path(path);
         }
     }
 
@@ -418,6 +461,7 @@ impl SheetzApp {
             Some(path) => match self.engine.save(&path) {
                 Ok(()) => {
                     self.status = format!("Saved {}", path.display());
+                    self.push_recent(&path);
                     true
                 }
                 Err(e) => {
@@ -443,6 +487,7 @@ impl SheetzApp {
         match self.engine.save(&path) {
             Ok(()) => {
                 self.status = format!("Saved {}", path.display());
+                self.push_recent(&path);
                 true
             }
             Err(e) => {
@@ -464,6 +509,7 @@ impl SheetzApp {
         match action {
             Pending::New => self.do_new(),
             Pending::Open => self.do_open(),
+            Pending::OpenPath(path) => self.open_path(path),
             Pending::Quit => {
                 self.allow_close = true;
                 ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -682,10 +728,13 @@ impl SheetzApp {
     fn ribbon(&mut self, ctx: &Context) -> Vec<Command> {
         let mut cmds = Vec::new();
         egui::TopBottomPanel::top("ribbon").show(ctx, |ui| {
-            // Tab strip; each tab switches the ribbon content below.
+            // Tab strip. File opens the full-screen backstage view (like
+            // Excel); the other tabs switch the ribbon content below.
             ui.horizontal(|ui| {
+                if ui.selectable_label(false, "File").clicked() {
+                    self.backstage = true;
+                }
                 for (tab, label) in [
-                    (RibbonTab::File, "File"),
                     (RibbonTab::Home, "Home"),
                     (RibbonTab::Sheet, "Sheet"),
                     (RibbonTab::Help, "Help"),
@@ -697,32 +746,6 @@ impl SheetzApp {
             });
             ui.separator();
             ui.horizontal(|ui| match self.ribbon_tab {
-                RibbonTab::File => {
-                    self.ribbon_group(
-                        ui,
-                        "Workbook",
-                        &[
-                            ("🗋", "New", Command::New),
-                            ("🗁", "Open", Command::Open),
-                        ],
-                        &mut cmds,
-                    );
-                    self.ribbon_group(
-                        ui,
-                        "Save",
-                        &[
-                            ("💾", "Save", Command::Save),
-                            ("🗐", "Save As", Command::SaveAs),
-                        ],
-                        &mut cmds,
-                    );
-                    self.ribbon_group(
-                        ui,
-                        "Application",
-                        &[("✖", "Quit", Command::Quit)],
-                        &mut cmds,
-                    );
-                }
                 RibbonTab::Home => {
                     self.ribbon_group(
                         ui,
@@ -871,7 +894,7 @@ impl SheetzApp {
     }
 
     fn confirm_dialog(&mut self, ctx: &Context) {
-        let Some(action) = self.pending else { return };
+        let Some(action) = self.pending.clone() else { return };
         let mut choice: Option<&str> = None;
         egui::Window::new("Unsaved changes")
             .collapsible(false)
@@ -1217,6 +1240,120 @@ impl SheetzApp {
         }
     }
 
+    /// Full-screen File view (Excel's "backstage"): nav sidebar on the left,
+    /// workbook info and recent files on the right.
+    fn backstage_ui(&mut self, ctx: &Context) {
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.backstage = false;
+            return;
+        }
+        let mut action: Option<Command> = None;
+        let mut open_recent: Option<PathBuf> = None;
+
+        egui::SidePanel::left("backstage-nav")
+            .resizable(false)
+            .exact_width(190.0)
+            .show(ctx, |ui| {
+                ui.add_space(8.0);
+                if ui
+                    .add(egui::Button::new(egui::RichText::new("←  Back").size(16.0)).frame(false))
+                    .clicked()
+                {
+                    self.backstage = false;
+                }
+                ui.add_space(16.0);
+                for (label, cmd) in [
+                    ("🗋  New", Command::New),
+                    ("🗁  Open…", Command::Open),
+                    ("💾  Save", Command::Save),
+                    ("🗐  Save As…", Command::SaveAs),
+                ] {
+                    let mut resp = ui.add_sized(
+                        [ui.available_width(), 34.0],
+                        egui::Button::new(egui::RichText::new(label).size(14.0)),
+                    );
+                    if let Some(sc) = self.keymap.shortcut_for(cmd) {
+                        resp = resp.on_hover_text(ui.ctx().format_shortcut(&sc));
+                    }
+                    if resp.clicked() {
+                        action = Some(cmd);
+                    }
+                    ui.add_space(4.0);
+                }
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(12.0);
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 34.0],
+                        egui::Button::new(egui::RichText::new("✖  Quit").size(14.0)),
+                    )
+                    .clicked()
+                {
+                    action = Some(Command::Quit);
+                }
+            });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.heading("Info");
+            ui.add_space(4.0);
+            match &self.engine.path {
+                Some(p) => {
+                    ui.label(
+                        egui::RichText::new(
+                            p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+                        )
+                        .strong(),
+                    );
+                    ui.label(egui::RichText::new(p.display().to_string()).weak());
+                }
+                None => {
+                    ui.label(egui::RichText::new("Book1").strong());
+                    ui.label(egui::RichText::new("Not saved yet").weak());
+                }
+            }
+            ui.label(format!(
+                "{} sheet(s){}",
+                self.engine.sheet_names().len(),
+                if self.engine.dirty {
+                    " — unsaved changes"
+                } else {
+                    ""
+                }
+            ));
+            ui.add_space(16.0);
+            ui.heading("Recent");
+            ui.add_space(4.0);
+            if self.recent.is_empty() {
+                ui.label(egui::RichText::new("No recent files.").weak());
+            }
+            for path in &self.recent {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                let resp = ui.link(name).on_hover_text(path.display().to_string());
+                if resp.clicked() {
+                    open_recent = Some(path.clone());
+                }
+            }
+        });
+
+        if let Some(cmd) = action {
+            self.backstage = false;
+            self.exec(cmd, ctx);
+        }
+        if let Some(path) = open_recent {
+            self.backstage = false;
+            if self.engine.dirty {
+                self.pending = Some(Pending::OpenPath(path));
+            } else {
+                self.open_path(path);
+            }
+        }
+    }
+
     fn update_title(&mut self, ctx: &Context) {
         let name = self
             .engine
@@ -1244,6 +1381,13 @@ impl eframe::App for SheetzApp {
         {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             self.pending = Some(Pending::Quit);
+        }
+
+        if self.backstage {
+            self.backstage_ui(ctx);
+            self.confirm_dialog(ctx);
+            self.update_title(ctx);
+            return;
         }
 
         let mut cmds = self.collect_input(ctx);
