@@ -7,12 +7,14 @@
 #
 # Sheetz looks for this file in: $SHEETZ_KEYMAP, ./keymap.toml,
 # ~/.config/sheetz/keymap.toml — first hit wins. Edit and restart.
+# The full command list is in src/commands.rs (Command::from_id);
+# press the binding for "shortcut_help" to see everything currently bound.
 #
-# Note: Ctrl+C / Ctrl+X / Ctrl+V additionally work through the platform
-# clipboard events regardless of what is bound here.
+# Note: Ctrl+C / Ctrl+X / Ctrl+V also work through the platform clipboard
+# events regardless of what is bound here.
 
 [bindings]
-# Navigation
+# --- Navigation ---
 "ArrowUp" = "move_up"
 "ArrowDown" = "move_down"
 "ArrowLeft" = "move_left"
@@ -26,6 +28,8 @@
 "Home" = "home"
 "Ctrl+Home" = "home_all"
 "Ctrl+End" = "end_data"
+"Ctrl+G" = "goto_cell"
+"F5" = "goto_cell"
 
 # Jump to edge of data region (Excel Ctrl+Arrow)
 "Ctrl+ArrowUp" = "jump_up"
@@ -33,14 +37,20 @@
 "Ctrl+ArrowLeft" = "jump_left"
 "Ctrl+ArrowRight" = "jump_right"
 
-# Extend selection
+# --- Selection ---
 "Shift+ArrowUp" = "extend_up"
 "Shift+ArrowDown" = "extend_down"
 "Shift+ArrowLeft" = "extend_left"
 "Shift+ArrowRight" = "extend_right"
+"Ctrl+Shift+ArrowUp" = "extend_jump_up"
+"Ctrl+Shift+ArrowDown" = "extend_jump_down"
+"Ctrl+Shift+ArrowLeft" = "extend_jump_left"
+"Ctrl+Shift+ArrowRight" = "extend_jump_right"
 "Ctrl+A" = "select_all"
+"Shift+Space" = "select_row"
+"Ctrl+Space" = "select_column"
 
-# Editing
+# --- Editing ---
 "F2" = "edit_cell"
 "Delete" = "clear"
 "Backspace" = "clear"
@@ -51,14 +61,52 @@
 "Ctrl+C" = "copy"
 "Ctrl+X" = "cut"
 "Ctrl+V" = "paste"
+"Ctrl+Shift+V" = "paste_values"
 
-# File
+# --- Formatting ---
+"Ctrl+B" = "bold"
+"Ctrl+I" = "italic"
+"Ctrl+U" = "underline"
+"Ctrl+5" = "strike"
+"Ctrl+L" = "align_left"
+"Ctrl+E" = "align_center"
+"Ctrl+Alt+R" = "align_right"
+"Ctrl+1" = "format_dialog"
+"Ctrl+Shift+1" = "format_comma"
+"Ctrl+Shift+4" = "format_currency"
+"Ctrl+Shift+5" = "format_percent"
+"Ctrl+Shift+3" = "format_date"
+"Ctrl+Shift+6" = "format_general"
+
+# --- Structure ---
+"Ctrl+Plus" = "insert_row"
+"Ctrl+Minus" = "delete_row"
+"Alt+Shift+I" = "insert_column"
+"Alt+Shift+D" = "delete_column"
+
+# --- Data ---
+"Ctrl+F" = "find_replace"
+"Ctrl+H" = "find_replace"
+"F3" = "find_next"
+"Shift+F3" = "find_prev"
+"Ctrl+Shift+L" = "toggle_filter"
+"Ctrl+F3" = "name_manager"
+
+# --- View ---
+"Ctrl+Shift+F" = "freeze_panes"
+"Ctrl+Shift+U" = "unfreeze"
+
+# --- File ---
 "Ctrl+N" = "new"
 "Ctrl+O" = "open"
 "Ctrl+S" = "save"
 "Ctrl+Shift+S" = "save_as"
 "Ctrl+W" = "quit"
 
-# Sheets
+# --- Sheets ---
 "Ctrl+PageDown" = "next_sheet"
 "Ctrl+PageUp" = "prev_sheet"
+"Shift+F11" = "new_sheet"
+
+# --- Help ---
+"F1" = "shortcut_help"

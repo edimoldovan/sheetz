@@ -1,71 +1,32 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
+//! Update loop, input handling and command dispatch.
+//!
+//! Rendering lives in the `ui` modules, each of which adds methods to
+//! `SheetzApp` (defined in `state.rs`).
 
-use eframe::egui::{
-    self, Align2, Context, CornerRadius, Event, FontId, Id, Key, Order, Pos2,
-    Rect, ScrollArea, Sense, Stroke, TextEdit, Ui, UiBuilder, Vec2, ViewportCommand,
-};
-use ironcalc::base::expressions::types::Area;
-use ironcalc::base::expressions::utils::number_to_column;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use eframe::egui::{Context, Event, ViewportCommand};
 
 use crate::commands::Command;
-use crate::engine::{Engine, MAX_COLS, MAX_ROWS};
+use crate::engine::{
+    BorderTarget, Engine, HAlign, Range, StyleEdit, MAX_COLS, MAX_ROWS,
+};
 use crate::keymap::Keymap;
+use crate::state::{
+    Dialog, EditMode, EditState, FindState, NameState, Pending, RibbonTab, SheetzApp, SortState,
+};
 
-const GUTTER_W: f32 = 48.0;
-const HEADER_H: f32 = 24.0;
-const CELL_FONT: f32 = 13.0;
-const CELL_PAD: f32 = 4.0;
-
-struct EditState {
-    row: i32,
-    col: i32,
-    text: String,
-    take_focus: bool,
-    caret_end: bool,
-    in_formula_bar: bool,
-}
-
-#[derive(Clone, PartialEq)]
-enum Pending {
-    New,
-    Open,
-    OpenPath(PathBuf),
-    Quit,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum RibbonTab {
-    Home,
-    Sheet,
-    Help,
-}
-
-pub struct SheetzApp {
-    engine: Engine,
-    keymap: Keymap,
-    sheet: u32,
-    cursor: (i32, i32), // (row, col), 1-based
-    anchor: (i32, i32),
-    saved_cursors: HashMap<u32, ((i32, i32), (i32, i32))>,
-    edit: Option<EditState>,
-    scroll_to_cursor: bool,
-    // Grid geometry cache: boundary offsets in px. row_off[r] is the y where
-    // row r+1 starts; row r (1-based) spans row_off[r-1]..row_off[r].
-    row_off: Vec<f32>,
-    col_off: Vec<f32>,
-    view_rows: i32,
-    view_cols: i32,
-    geom_dirty: bool,
-    rows_per_page: i32,
-    pending: Option<Pending>,
-    allow_close: bool,
-    status: String,
-    last_title: String,
-    ribbon_tab: RibbonTab,
-    backstage: bool,
-    recent: Vec<PathBuf>,
-}
+const DEFAULT_FILL_COLORS: [[u8; 3]; 8] = [
+    [255, 255, 255],
+    [255, 242, 204],
+    [226, 239, 218],
+    [222, 235, 247],
+    [252, 228, 214],
+    [237, 237, 237],
+    [255, 217, 217],
+    [230, 224, 236],
+];
 
 fn recent_file() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/sheetz/recent.txt"))
@@ -110,6 +71,19 @@ impl SheetzApp {
             view_cols: 0,
             geom_dirty: true,
             rows_per_page: 30,
+            zoom: 1.0,
+            resizing: None,
+            fill_drag: None,
+            cut_marker: None,
+            dialog: Dialog::None,
+            find: FindState::default(),
+            sort: SortState::default(),
+            names: NameState::default(),
+            goto_text: String::new(),
+            filter: None,
+            cf: crate::state::CfState::default(),
+            charts: Vec::new(),
+            chart_draft: crate::state::ChartKind::Bar,
             pending: None,
             allow_close: false,
             status,
@@ -117,21 +91,27 @@ impl SheetzApp {
             ribbon_tab: RibbonTab::Home,
             backstage: false,
             recent: load_recent(),
+            recent_colors: DEFAULT_FILL_COLORS.to_vec(),
         };
+        if let Some(p) = &path {
+            if app.engine.path.is_some() {
+                app.push_recent(&p.clone());
+            }
+        }
         app.reset_view();
         app
     }
 
-    // ----- geometry -----
+    // ----- view bookkeeping -----
 
-    fn reset_view(&mut self) {
+    pub fn reset_view(&mut self) {
         let (ur, uc) = self.engine.used_range(self.sheet);
         self.view_rows = (ur + 50).clamp(200, MAX_ROWS);
         self.view_cols = (uc + 10).clamp(30, MAX_COLS);
         self.geom_dirty = true;
     }
 
-    fn ensure_view_contains(&mut self, row: i32, col: i32) {
+    pub fn ensure_view_contains(&mut self, row: i32, col: i32) {
         if row > self.view_rows - 2 {
             self.view_rows = (row + 100).min(MAX_ROWS);
             self.geom_dirty = true;
@@ -142,83 +122,9 @@ impl SheetzApp {
         }
     }
 
-    fn ensure_geometry(&mut self) {
-        if !self.geom_dirty
-            && self.row_off.len() == self.view_rows as usize + 1
-            && self.col_off.len() == self.view_cols as usize + 1
-        {
-            return;
-        }
-        self.row_off.clear();
-        self.row_off.reserve(self.view_rows as usize + 1);
-        self.row_off.push(0.0);
-        let mut y = 0.0f32;
-        for r in 1..=self.view_rows {
-            y += self.engine.row_height(self.sheet, r);
-            self.row_off.push(y);
-        }
-        self.col_off.clear();
-        self.col_off.reserve(self.view_cols as usize + 1);
-        self.col_off.push(0.0);
-        let mut x = 0.0f32;
-        for c in 1..=self.view_cols {
-            x += self.engine.col_width(self.sheet, c);
-            self.col_off.push(x);
-        }
-        self.geom_dirty = false;
-    }
+    // ----- cursor movement -----
 
-    fn cell_rect(&self, row: i32, col: i32, origin: Pos2) -> Rect {
-        let r = row as usize;
-        let c = col as usize;
-        Rect::from_min_max(
-            origin + Vec2::new(self.col_off[c - 1], self.row_off[r - 1]),
-            origin + Vec2::new(self.col_off[c], self.row_off[r]),
-        )
-    }
-
-    fn cell_at(&self, pos: Pos2, origin: Pos2) -> (i32, i32) {
-        let p = pos - origin;
-        let row = self.row_off.partition_point(|&y| y <= p.y).max(1) as i32;
-        let col = self.col_off.partition_point(|&x| x <= p.x).max(1) as i32;
-        (row.min(self.view_rows), col.min(self.view_cols))
-    }
-
-    fn selection(&self) -> (i32, i32, i32, i32) {
-        (
-            self.cursor.0.min(self.anchor.0),
-            self.cursor.0.max(self.anchor.0),
-            self.cursor.1.min(self.anchor.1),
-            self.cursor.1.max(self.anchor.1),
-        )
-    }
-
-    // ----- editing -----
-
-    fn start_edit(&mut self, text: String, caret_end: bool) {
-        self.anchor = self.cursor;
-        self.edit = Some(EditState {
-            row: self.cursor.0,
-            col: self.cursor.1,
-            text,
-            take_focus: true,
-            caret_end,
-            in_formula_bar: false,
-        });
-    }
-
-    fn commit_edit(&mut self, edit: &EditState) {
-        if let Err(e) = self
-            .engine
-            .set_input(self.sheet, edit.row, edit.col, edit.text.trim_end())
-        {
-            self.status = format!("Error: {e}");
-        }
-    }
-
-    // ----- commands -----
-
-    fn move_cursor(&mut self, dr: i32, dc: i32, extend: bool) {
+    pub fn move_cursor(&mut self, dr: i32, dc: i32, extend: bool) {
         self.cursor.0 = (self.cursor.0 + dr).clamp(1, MAX_ROWS);
         self.cursor.1 = (self.cursor.1 + dc).clamp(1, MAX_COLS);
         if !extend {
@@ -228,7 +134,7 @@ impl SheetzApp {
         self.scroll_to_cursor = true;
     }
 
-    fn set_cursor(&mut self, row: i32, col: i32) {
+    pub fn set_cursor(&mut self, row: i32, col: i32) {
         self.cursor = (row.clamp(1, MAX_ROWS), col.clamp(1, MAX_COLS));
         self.anchor = self.cursor;
         self.ensure_view_contains(self.cursor.0, self.cursor.1);
@@ -236,12 +142,11 @@ impl SheetzApp {
     }
 
     /// Excel Ctrl+Arrow: jump to the boundary of the current data region.
-    fn jump(&mut self, dr: i32, dc: i32) {
+    pub fn jump(&mut self, dr: i32, dc: i32, extend: bool) {
         let (ur, uc) = self.engine.used_range(self.sheet);
         let (r, c) = self.cursor;
-        let filled = |r: i32, c: i32| !self.engine.is_empty(self.sheet, r, c);
-        // Scan limit in the positive direction: the used range; landing past it
-        // means "edge of sheet" like Excel.
+        let sheet = self.sheet;
+        let filled = |r: i32, c: i32| !self.engine.is_empty(sheet, r, c);
         let (target_r, target_c);
         if dr != 0 {
             let far = if dr > 0 { MAX_ROWS } else { 1 };
@@ -254,126 +159,332 @@ impl SheetzApp {
             target_c = jump_axis(c, dc, far, scan_end, |i| filled(r, i));
             target_r = r;
         }
-        self.set_cursor(target_r, target_c);
-    }
-
-    fn clear_selection(&mut self) {
-        let (r0, r1, c0, c1) = self.selection();
-        for r in r0..=r1 {
-            for c in c0..=c1 {
-                if !self.engine.is_empty(self.sheet, r, c) {
-                    let _ = self.engine.set_input(self.sheet, r, c, "");
-                }
-            }
+        if extend {
+            self.cursor = (target_r, target_c);
+            self.ensure_view_contains(target_r, target_c);
+            self.scroll_to_cursor = true;
+        } else {
+            self.set_cursor(target_r, target_c);
         }
     }
 
-    fn fill_down(&mut self) {
-        let (r0, r1, c0, c1) = self.selection();
-        let width = c1 - c0 + 1;
-        let result = if r1 > r0 {
-            self.engine.auto_fill_rows(
-                Area {
-                    sheet: self.sheet,
-                    row: r0,
-                    column: c0,
-                    width,
-                    height: 1,
-                },
-                r1,
-            )
-        } else if r0 > 1 {
-            self.engine.auto_fill_rows(
-                Area {
-                    sheet: self.sheet,
-                    row: r0 - 1,
-                    column: c0,
-                    width,
-                    height: 1,
-                },
-                r0,
-            )
+    // ----- clipboard -----
+
+    fn copy_selection(&mut self, ctx: &Context, cut: bool) {
+        let sel = self.selection();
+        let sheet = self.sheet;
+        match self.engine.copy(sheet, sel) {
+            Ok(tsv) => {
+                ctx.copy_text(tsv);
+                self.cut_marker = if cut { Some((sheet, sel)) } else { None };
+            }
+            Err(e) => self.set_status(format!("Copy: {e}")),
+        }
+    }
+
+    fn paste(&mut self, values_only: bool) {
+        let text = arboard::Clipboard::new()
+            .and_then(|mut cb| cb.get_text())
+            .unwrap_or_default();
+        let at = (self.cursor.0.min(self.anchor.0), self.cursor.1.min(self.anchor.1));
+        let sheet = self.sheet;
+
+        // Prefer the internal (formula-aware, styled) clipboard when the system
+        // clipboard still holds the same text we put there.
+        let use_internal =
+            !values_only && self.engine.has_internal_clip() && self.engine.clip_matches(&text);
+        let cut_source = self.cut_marker.take();
+        let result = if use_internal {
+            self.engine.paste_internal(sheet, at, cut_source.is_some())
+        } else if !text.is_empty() {
+            self.engine.paste_text(sheet, at, &text)
         } else {
             Ok(())
         };
         if let Err(e) = result {
-            self.status = format!("Fill down: {e}");
+            self.set_status(format!("Paste: {e}"));
         }
+        self.invalidate_geometry();
     }
 
-    fn fill_right(&mut self) {
-        let (r0, r1, c0, c1) = self.selection();
-        let height = r1 - r0 + 1;
-        let result = if c1 > c0 {
-            self.engine.auto_fill_columns(
-                Area {
-                    sheet: self.sheet,
-                    row: r0,
-                    column: c0,
-                    width: 1,
-                    height,
-                },
-                c1,
-            )
-        } else if c0 > 1 {
-            self.engine.auto_fill_columns(
-                Area {
-                    sheet: self.sheet,
-                    row: r0,
-                    column: c0 - 1,
-                    width: 1,
-                    height,
-                },
-                c0,
-            )
+    // ----- formatting helpers -----
+
+    /// Applies a style edit to the current selection.
+    pub fn style_selection(&mut self, edit: StyleEdit) {
+        let sel = self.selection();
+        let sheet = self.sheet;
+        let result = self.engine.set_style(sheet, sel, edit);
+        self.report("Format", result);
+        self.invalidate_geometry();
+    }
+
+    /// Toggles a boolean font attribute based on the active cell's state.
+    fn toggle_font(&mut self, which: Command) {
+        let fmt = self.engine.format(self.sheet, self.cursor.0, self.cursor.1);
+        let edit = match which {
+            Command::ToggleBold => StyleEdit::Bold(!fmt.bold),
+            Command::ToggleItalic => StyleEdit::Italic(!fmt.italic),
+            Command::ToggleUnderline => StyleEdit::Underline(!fmt.underline),
+            Command::ToggleStrike => StyleEdit::Strike(!fmt.strike),
+            Command::ToggleWrap => StyleEdit::Wrap(!fmt.wrap),
+            _ => return,
+        };
+        self.style_selection(edit);
+    }
+
+    fn change_font_size(&mut self, delta: i32) {
+        let fmt = self.engine.format(self.sheet, self.cursor.0, self.cursor.1);
+        let size = (fmt.font_size as i32 + delta).clamp(6, 96);
+        self.style_selection(StyleEdit::FontSize(size));
+    }
+
+    /// Adds or removes one decimal place from the active cell's number format.
+    fn change_decimals(&mut self, delta: i32) {
+        let fmt = self.engine.format(self.sheet, self.cursor.0, self.cursor.1);
+        let current = &fmt.num_fmt;
+        let decimals = current
+            .split_once('.')
+            .map(|(_, rest)| rest.chars().take_while(|c| *c == '0').count() as i32)
+            .unwrap_or(0);
+        let new_decimals = (decimals + delta).clamp(0, 10);
+        let has_comma = current.contains("#,##");
+        let base = if has_comma { "#,##0" } else { "0" };
+        let new_fmt = if new_decimals == 0 {
+            base.to_string()
+        } else {
+            format!("{base}.{}", "0".repeat(new_decimals as usize))
+        };
+        self.style_selection(StyleEdit::NumFmt(new_fmt));
+    }
+
+    fn set_border(&mut self, target: BorderTarget) {
+        let sel = self.selection();
+        let sheet = self.sheet;
+        let result = self.engine.set_border(sheet, sel, target, "#4A4A4A");
+        self.report("Border", result);
+    }
+
+    // ----- structure -----
+
+    fn insert_rows_at_selection(&mut self) {
+        let sel = self.selection();
+        let (sheet, count) = (self.sheet, sel.rows());
+        let result = self.engine.insert_rows(sheet, sel.r0, count);
+        self.report("Insert row", result);
+        self.invalidate_geometry();
+    }
+
+    fn delete_rows_at_selection(&mut self) {
+        let sel = self.selection();
+        let (sheet, count) = (self.sheet, sel.rows());
+        let result = self.engine.delete_rows(sheet, sel.r0, count);
+        self.report("Delete row", result);
+        self.invalidate_geometry();
+    }
+
+    fn insert_cols_at_selection(&mut self) {
+        let sel = self.selection();
+        let (sheet, count) = (self.sheet, sel.cols());
+        let result = self.engine.insert_cols(sheet, sel.c0, count);
+        self.report("Insert column", result);
+        self.invalidate_geometry();
+    }
+
+    fn delete_cols_at_selection(&mut self) {
+        let sel = self.selection();
+        let (sheet, count) = (self.sheet, sel.cols());
+        let result = self.engine.delete_cols(sheet, sel.c0, count);
+        self.report("Delete column", result);
+        self.invalidate_geometry();
+    }
+
+    fn autofit_columns(&mut self) {
+        let sel = self.selection();
+        let sheet = self.sheet;
+        for c in sel.c0..=sel.c1 {
+            let width = self.engine.autofit_width(sheet, c);
+            let result = self.engine.set_col_width(sheet, c, c, width);
+            self.report("Autofit", result);
+        }
+        self.invalidate_geometry();
+    }
+
+    // ----- fill -----
+
+    pub fn fill_down(&mut self) {
+        let sel = self.selection();
+        let sheet = self.sheet;
+        let result = if sel.rows() > 1 {
+            let src = Range { r1: sel.r0, ..sel };
+            self.engine.auto_fill_rows(sheet, src, sel.r1)
+        } else if sel.r0 > 1 {
+            let src = Range {
+                r0: sel.r0 - 1,
+                r1: sel.r0 - 1,
+                ..sel
+            };
+            self.engine.auto_fill_rows(sheet, src, sel.r0)
         } else {
             Ok(())
         };
-        if let Err(e) = result {
-            self.status = format!("Fill right: {e}");
+        self.report("Fill down", result);
+    }
+
+    pub fn fill_right(&mut self) {
+        let sel = self.selection();
+        let sheet = self.sheet;
+        let result = if sel.cols() > 1 {
+            let src = Range { c1: sel.c0, ..sel };
+            self.engine.auto_fill_columns(sheet, src, sel.c1)
+        } else if sel.c0 > 1 {
+            let src = Range {
+                c0: sel.c0 - 1,
+                c1: sel.c0 - 1,
+                ..sel
+            };
+            self.engine.auto_fill_columns(sheet, src, sel.c0)
+        } else {
+            Ok(())
+        };
+        self.report("Fill right", result);
+    }
+
+    // ----- find -----
+
+    pub fn run_find(&mut self) {
+        let (needle, case, workbook) = (
+            self.find.needle.clone(),
+            self.find.match_case,
+            self.find.whole_workbook,
+        );
+        if needle.is_empty() {
+            self.find.hits.clear();
+            self.find.message.clear();
+            return;
+        }
+        self.find.hits = self.engine.find(self.sheet, &needle, case, workbook);
+        self.find.index = 0;
+        self.find.message = if self.find.hits.is_empty() {
+            "No matches".to_string()
+        } else {
+            format!("{} match(es)", self.find.hits.len())
+        };
+        self.goto_hit();
+    }
+
+    pub fn find_step(&mut self, forward: bool) {
+        if self.find.hits.is_empty() {
+            self.run_find();
+            return;
+        }
+        let len = self.find.hits.len();
+        self.find.index = if forward {
+            (self.find.index + 1) % len
+        } else {
+            (self.find.index + len - 1) % len
+        };
+        self.goto_hit();
+    }
+
+    fn goto_hit(&mut self) {
+        let Some(hit) = self.find.hits.get(self.find.index).cloned() else {
+            return;
+        };
+        if hit.sheet != self.sheet {
+            self.switch_sheet(hit.sheet);
+        }
+        self.set_cursor(hit.row, hit.col);
+        if !self.find.hits.is_empty() {
+            self.find.message = format!("{} of {}", self.find.index + 1, self.find.hits.len());
         }
     }
 
-    fn copy_selection(&self, ctx: &Context) {
-        let (r0, r1, c0, c1) = self.selection();
-        let mut out = String::new();
-        for r in r0..=r1 {
-            if r > r0 {
-                out.push('\n');
-            }
-            for c in c0..=c1 {
-                if c > c0 {
-                    out.push('\t');
-                }
-                out.push_str(&self.engine.display(self.sheet, r, c));
+    // ----- sort & filter -----
+
+    fn sort_selection(&mut self, ascending: bool) {
+        let mut sel = self.selection();
+        // A single cell means "sort the surrounding data block by this column".
+        let key_col = self.cursor.1;
+        if sel.rows() == 1 && sel.cols() == 1 {
+            let (ur, uc) = self.engine.used_range(self.sheet);
+            sel = Range {
+                r0: 1,
+                r1: ur,
+                c0: 1,
+                c1: uc,
+            };
+            // Skip a header row if the first row looks like labels.
+            if self.looks_like_header(sel) {
+                sel.r0 = 2;
             }
         }
-        ctx.copy_text(out);
+        let sheet = self.sheet;
+        let result = self.engine.sort_range(sheet, sel, key_col, ascending);
+        self.report("Sort", result);
     }
 
-    fn paste_tsv(&mut self, text: &str) {
-        let (row, col) = self.cursor;
-        let mut last = (row, col);
-        for (i, line) in text.lines().enumerate() {
-            for (j, field) in line.split('\t').enumerate() {
-                let (r, c) = (row + i as i32, col + j as i32);
-                if r > MAX_ROWS || c > MAX_COLS {
+    fn looks_like_header(&self, range: Range) -> bool {
+        (range.c0..=range.c1).any(|c| {
+            !self.engine.is_empty(self.sheet, range.r0, c)
+                && !self.engine.is_number(self.sheet, range.r0, c)
+        })
+    }
+
+    /// Re-applies the active filter by hiding rows that fail it.
+    pub fn apply_filter(&mut self) {
+        let Some(filter) = self.filter.clone() else {
+            return;
+        };
+        let sheet = self.sheet;
+        for row in (filter.header_row + 1)..=filter.r1 {
+            let mut visible = true;
+            for (col, allowed) in &filter.allowed {
+                if allowed.is_empty() {
                     continue;
                 }
-                if let Err(e) = self.engine.set_input(self.sheet, r, c, field) {
-                    self.status = format!("Paste: {e}");
-                    return;
+                let value = self.engine.display(sheet, row, *col);
+                if !allowed.contains(&value) {
+                    visible = false;
+                    break;
                 }
-                last = (r, c);
             }
+            let _ = self.engine.set_rows_hidden(sheet, row, row, !visible);
         }
-        self.anchor = self.cursor;
-        self.cursor = last;
-        std::mem::swap(&mut self.cursor, &mut self.anchor);
-        self.ensure_view_contains(last.0, last.1);
+        self.invalidate_geometry();
     }
 
-    fn switch_sheet(&mut self, sheet: u32) {
+    fn toggle_filter(&mut self) {
+        if let Some(filter) = self.filter.take() {
+            let sheet = self.sheet;
+            let _ = self
+                .engine
+                .set_rows_hidden(sheet, filter.header_row + 1, filter.r1, false);
+            self.set_status("Filter removed");
+        } else {
+            let (ur, uc) = self.engine.used_range(self.sheet);
+            let sel = self.selection();
+            let (r0, r1, c0, c1) = if sel.rows() > 1 {
+                (sel.r0, sel.r1, sel.c0, sel.c1)
+            } else {
+                (1, ur, 1, uc)
+            };
+            self.filter = Some(crate::state::Filter {
+                header_row: r0,
+                r0,
+                r1,
+                c0,
+                c1,
+                allowed: HashMap::new(),
+                open_column: None,
+            });
+            self.set_status("Filter added — click a header arrow to filter");
+        }
+        self.invalidate_geometry();
+    }
+
+    // ----- sheets -----
+
+    pub fn switch_sheet(&mut self, sheet: u32) {
         let count = self.engine.sheet_names().len() as u32;
         let sheet = sheet.min(count.saturating_sub(1));
         if sheet == self.sheet {
@@ -390,6 +501,7 @@ impl SheetzApp {
         self.cursor = cursor;
         self.anchor = anchor;
         self.edit = None;
+        self.filter = None;
         self.reset_view();
         self.scroll_to_cursor = true;
     }
@@ -400,19 +512,26 @@ impl SheetzApp {
         match Engine::new() {
             Ok(engine) => {
                 self.engine = engine;
-                self.sheet = 0;
-                self.cursor = (1, 1);
-                self.anchor = (1, 1);
-                self.saved_cursors.clear();
-                self.edit = None;
-                self.reset_view();
+                self.reset_after_load();
                 self.status.clear();
             }
-            Err(e) => self.status = format!("New: {e}"),
+            Err(e) => self.set_status(format!("New: {e}")),
         }
     }
 
-    fn push_recent(&mut self, path: &std::path::Path) {
+    fn reset_after_load(&mut self) {
+        self.sheet = 0;
+        self.cursor = (1, 1);
+        self.anchor = (1, 1);
+        self.saved_cursors.clear();
+        self.edit = None;
+        self.filter = None;
+        self.cut_marker = None;
+        self.find.hits.clear();
+        self.reset_view();
+    }
+
+    pub fn push_recent(&mut self, path: &Path) {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         self.recent.retain(|p| *p != path);
         self.recent.insert(0, path);
@@ -430,20 +549,15 @@ impl SheetzApp {
         }
     }
 
-    fn open_path(&mut self, path: PathBuf) {
+    pub fn open_path(&mut self, path: PathBuf) {
         match Engine::open(&path) {
             Ok(engine) => {
                 self.engine = engine;
-                self.sheet = 0;
-                self.cursor = (1, 1);
-                self.anchor = (1, 1);
-                self.saved_cursors.clear();
-                self.edit = None;
-                self.reset_view();
-                self.status = format!("Opened {}", path.display());
+                self.reset_after_load();
+                self.set_status(format!("Opened {}", path.display()));
                 self.push_recent(&path);
             }
-            Err(e) => self.status = format!("Could not open {}: {e}", path.display()),
+            Err(e) => self.set_status(format!("Could not open {}: {e}", path.display())),
         }
     }
 
@@ -456,16 +570,16 @@ impl SheetzApp {
         }
     }
 
-    fn do_save(&mut self) -> bool {
+    pub fn do_save(&mut self) -> bool {
         match self.engine.path.clone() {
             Some(path) => match self.engine.save(&path) {
                 Ok(()) => {
-                    self.status = format!("Saved {}", path.display());
+                    self.set_status(format!("Saved {}", path.display()));
                     self.push_recent(&path);
                     true
                 }
                 Err(e) => {
-                    self.status = format!("Save failed: {e}");
+                    self.set_status(format!("Save failed: {e}"));
                     false
                 }
             },
@@ -473,7 +587,7 @@ impl SheetzApp {
         }
     }
 
-    fn do_save_as(&mut self) -> bool {
+    pub fn do_save_as(&mut self) -> bool {
         let Some(mut path) = rfd::FileDialog::new()
             .add_filter("Excel workbook", &["xlsx"])
             .set_file_name("Book1.xlsx")
@@ -486,12 +600,12 @@ impl SheetzApp {
         }
         match self.engine.save(&path) {
             Ok(()) => {
-                self.status = format!("Saved {}", path.display());
+                self.set_status(format!("Saved {}", path.display()));
                 self.push_recent(&path);
                 true
             }
             Err(e) => {
-                self.status = format!("Save failed: {e}");
+                self.set_status(format!("Save failed: {e}"));
                 false
             }
         }
@@ -505,7 +619,7 @@ impl SheetzApp {
         }
     }
 
-    fn run_pending(&mut self, action: Pending, ctx: &Context) {
+    pub fn run_pending(&mut self, action: Pending, ctx: &Context) {
         match action {
             Pending::New => self.do_new(),
             Pending::Open => self.do_open(),
@@ -517,7 +631,9 @@ impl SheetzApp {
         }
     }
 
-    fn exec(&mut self, cmd: Command, ctx: &Context) {
+    // ----- dispatch -----
+
+    pub fn exec(&mut self, cmd: Command, ctx: &Context) {
         use Command::*;
         match cmd {
             MoveUp => self.move_cursor(-1, 0, false),
@@ -528,10 +644,14 @@ impl SheetzApp {
             ExtendDown => self.move_cursor(1, 0, true),
             ExtendLeft => self.move_cursor(0, -1, true),
             ExtendRight => self.move_cursor(0, 1, true),
-            JumpUp => self.jump(-1, 0),
-            JumpDown => self.jump(1, 0),
-            JumpLeft => self.jump(0, -1),
-            JumpRight => self.jump(0, 1),
+            JumpUp => self.jump(-1, 0, false),
+            JumpDown => self.jump(1, 0, false),
+            JumpLeft => self.jump(0, -1, false),
+            JumpRight => self.jump(0, 1, false),
+            ExtendJumpUp => self.jump(-1, 0, true),
+            ExtendJumpDown => self.jump(1, 0, true),
+            ExtendJumpLeft => self.jump(0, -1, true),
+            ExtendJumpRight => self.jump(0, 1, true),
             PageUp => self.move_cursor(-self.rows_per_page.max(1), 0, false),
             PageDown => self.move_cursor(self.rows_per_page.max(1), 0, false),
             Home => self.set_cursor(self.cursor.0, 1),
@@ -540,37 +660,148 @@ impl SheetzApp {
                 let (ur, uc) = self.engine.used_range(self.sheet);
                 self.set_cursor(ur, uc);
             }
+            GotoCell => {
+                self.goto_text.clear();
+                self.dialog = Dialog::GotoCell;
+            }
+
+            SelectAll => {
+                let (ur, uc) = self.engine.used_range(self.sheet);
+                self.anchor = (1, 1);
+                self.cursor = (ur.max(1), uc.max(1));
+            }
+            SelectRow => {
+                let row = self.cursor.0;
+                self.anchor = (row, 1);
+                self.cursor = (row, self.view_cols.min(MAX_COLS));
+            }
+            SelectColumn => {
+                let col = self.cursor.1;
+                self.anchor = (1, col);
+                self.cursor = (self.view_rows.min(MAX_ROWS), col);
+            }
+
             EditCell => {
                 let text = self.engine.content(self.sheet, self.cursor.0, self.cursor.1);
-                self.start_edit(text, true);
+                self.begin_edit(text, EditMode::Edit);
             }
-            Clear => self.clear_selection(),
+            Clear => {
+                let sel = self.selection();
+                let sheet = self.sheet;
+                let result = self.engine.clear_contents(sheet, sel);
+                self.report("Clear", result);
+            }
+            ClearFormats => {
+                let sel = self.selection();
+                let sheet = self.sheet;
+                let result = self.engine.clear_formatting(sheet, sel);
+                self.report("Clear formats", result);
+                self.invalidate_geometry();
+            }
+            ClearAll => {
+                let sel = self.selection();
+                let sheet = self.sheet;
+                let result = self.engine.clear_all(sheet, sel);
+                self.report("Clear all", result);
+                self.invalidate_geometry();
+            }
             FillDown => self.fill_down(),
             FillRight => self.fill_right(),
             Undo => {
                 self.engine.undo();
-                self.geom_dirty = true;
+                self.invalidate_geometry();
             }
             Redo => {
                 self.engine.redo();
-                self.geom_dirty = true;
+                self.invalidate_geometry();
             }
-            Copy => self.copy_selection(ctx),
-            Cut => {
-                self.copy_selection(ctx);
-                self.clear_selection();
+            Copy => self.copy_selection(ctx, false),
+            Cut => self.copy_selection(ctx, true),
+            Paste => self.paste(false),
+            PasteValues => self.paste(true),
+
+            ToggleBold | ToggleItalic | ToggleUnderline | ToggleStrike | ToggleWrap => {
+                self.toggle_font(cmd)
             }
-            Paste => {
-                match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-                    Ok(text) => self.paste_tsv(&text),
-                    Err(e) => self.status = format!("Paste: {e}"),
-                }
+            AlignLeft => self.style_selection(StyleEdit::Align(HAlign::Left)),
+            AlignCenter => self.style_selection(StyleEdit::Align(HAlign::Center)),
+            AlignRight => self.style_selection(StyleEdit::Align(HAlign::Right)),
+            IncreaseFont => self.change_font_size(1),
+            DecreaseFont => self.change_font_size(-1),
+            BorderAll => self.set_border(BorderTarget::All),
+            BorderOuter => self.set_border(BorderTarget::Outer),
+            BorderBottom => self.set_border(BorderTarget::Bottom),
+            BorderNone => self.set_border(BorderTarget::None),
+            FormatGeneral => self.style_selection(StyleEdit::NumFmt("general".into())),
+            FormatNumber => self.style_selection(StyleEdit::NumFmt("0.00".into())),
+            FormatCurrency => {
+                self.style_selection(StyleEdit::NumFmt("\"$\"#,##0.00".into()))
             }
-            SelectAll => {
-                let (ur, uc) = self.engine.used_range(self.sheet);
-                self.anchor = (1, 1);
-                self.cursor = (ur, uc);
+            FormatPercent => self.style_selection(StyleEdit::NumFmt("0.00%".into())),
+            FormatComma => self.style_selection(StyleEdit::NumFmt("#,##0.00".into())),
+            FormatDate => self.style_selection(StyleEdit::NumFmt("yyyy-mm-dd".into())),
+            IncreaseDecimal => self.change_decimals(1),
+            DecreaseDecimal => self.change_decimals(-1),
+            FormatDialog => self.dialog = Dialog::FormatCells,
+
+            InsertRow => self.insert_rows_at_selection(),
+            InsertColumn => self.insert_cols_at_selection(),
+            DeleteRow => self.delete_rows_at_selection(),
+            DeleteColumn => self.delete_cols_at_selection(),
+            AutofitColumn => self.autofit_columns(),
+
+            FindReplace => {
+                self.dialog = Dialog::FindReplace;
             }
+            FindNext => self.find_step(true),
+            FindPrev => self.find_step(false),
+            SortAscending => self.sort_selection(true),
+            SortDescending => self.sort_selection(false),
+            ToggleFilter => self.toggle_filter(),
+            NameManager => self.dialog = Dialog::NameManager,
+            ConditionalFormat => self.dialog = Dialog::ConditionalFormat,
+            InsertChart => self.dialog = Dialog::Chart,
+
+            FreezePanes => {
+                let (r, c) = (self.cursor.0 - 1, self.cursor.1 - 1);
+                let sheet = self.sheet;
+                let result = self.engine.set_frozen(sheet, r, c);
+                self.report("Freeze", result);
+            }
+            FreezeTopRow => {
+                let sheet = self.sheet;
+                let result = self.engine.set_frozen(sheet, 1, 0);
+                self.report("Freeze", result);
+            }
+            FreezeFirstColumn => {
+                let sheet = self.sheet;
+                let result = self.engine.set_frozen(sheet, 0, 1);
+                self.report("Freeze", result);
+            }
+            Unfreeze => {
+                let sheet = self.sheet;
+                let result = self.engine.set_frozen(sheet, 0, 0);
+                self.report("Unfreeze", result);
+            }
+            ToggleGridLines => {
+                let sheet = self.sheet;
+                let show = !self.engine.show_grid_lines(sheet);
+                let result = self.engine.set_show_grid_lines(sheet, show);
+                self.report("Grid lines", result);
+            }
+            ZoomIn => {
+                self.zoom = (self.zoom + 0.1).min(4.0);
+                self.invalidate_geometry();
+            }
+            ZoomOut => {
+                self.zoom = (self.zoom - 0.1).max(0.4);
+                self.invalidate_geometry();
+            }
+            ZoomReset => {
+                self.zoom = 1.0;
+                self.invalidate_geometry();
+            }
+
             New => self.request(Pending::New, ctx),
             Open => self.request(Pending::Open, ctx),
             Save => {
@@ -579,17 +810,67 @@ impl SheetzApp {
             SaveAs => {
                 self.do_save_as();
             }
+            Quit => self.request(Pending::Quit, ctx),
+
             NextSheet => self.switch_sheet(self.sheet + 1),
             PrevSheet => self.switch_sheet(self.sheet.saturating_sub(1)),
             NewSheet => {
                 if let Err(e) = self.engine.new_sheet() {
-                    self.status = format!("New sheet: {e}");
+                    self.set_status(format!("New sheet: {e}"));
                 } else {
                     let last = self.engine.sheet_names().len() as u32 - 1;
                     self.switch_sheet(last);
                 }
             }
-            Quit => self.request(Pending::Quit, ctx),
+            RenameSheet => {
+                let name = self
+                    .engine
+                    .sheet_names()
+                    .get(self.sheet as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                self.dialog = Dialog::RenameSheet {
+                    sheet: self.sheet,
+                    name,
+                };
+            }
+            DeleteSheet => {
+                if self.engine.sheet_names().len() <= 1 {
+                    self.set_status("A workbook needs at least one sheet");
+                } else {
+                    let sheet = self.sheet;
+                    let result = self.engine.delete_sheet(sheet);
+                    self.report("Delete sheet", result);
+                    self.sheet = 0;
+                    self.cursor = (1, 1);
+                    self.anchor = (1, 1);
+                    self.reset_view();
+                }
+            }
+            DuplicateSheet => {
+                let sheet = self.sheet;
+                let result = self.engine.duplicate_sheet(sheet);
+                self.report("Duplicate sheet", result);
+            }
+            MoveSheetLeft => {
+                if self.sheet > 0 {
+                    let (from, to) = (self.sheet, self.sheet - 1);
+                    let result = self.engine.move_sheet(from, to);
+                    self.report("Move sheet", result);
+                    self.sheet = to;
+                }
+            }
+            MoveSheetRight => {
+                let count = self.engine.sheet_names().len() as u32;
+                if self.sheet + 1 < count {
+                    let (from, to) = (self.sheet, self.sheet + 1);
+                    let result = self.engine.move_sheet(from, to);
+                    self.report("Move sheet", result);
+                    self.sheet = to;
+                }
+            }
+
+            ShortcutHelp => self.dialog = Dialog::Shortcuts,
         }
     }
 
@@ -597,10 +878,9 @@ impl SheetzApp {
 
     fn collect_input(&mut self, ctx: &Context) -> Vec<Command> {
         let mut cmds = Vec::new();
-        // While a text field (cell editor, formula bar, ...) has focus, global
-        // shortcuts stay out of the way; Enter/Tab/Escape are handled by the
-        // edit widgets themselves.
-        if self.edit.is_some() || ctx.wants_keyboard_input() {
+        // While a text field (cell editor, dialog, ...) has focus, global
+        // shortcuts stay out of the way.
+        if self.edit.is_some() || self.dialog != Dialog::None || ctx.wants_keyboard_input() {
             return cmds;
         }
         ctx.input_mut(|input| {
@@ -610,8 +890,6 @@ impl SheetzApp {
                 }
             }
         });
-        // Typing any printable character starts editing the active cell,
-        // replacing its content — Excel behavior.
         let mut typed = String::new();
         let mut clipboard = Vec::new();
         ctx.input(|input| {
@@ -620,740 +898,94 @@ impl SheetzApp {
                     Event::Text(t) => typed.push_str(t),
                     Event::Copy => clipboard.push(Command::Copy),
                     Event::Cut => clipboard.push(Command::Cut),
-                    Event::Paste(text) => {
-                        // Paste arrives with its payload; handle inline.
+                    Event::Paste(_) => {
                         clipboard.push(Command::Paste);
                         typed.clear();
-                        let _ = text;
                     }
                     _ => {}
                 }
             }
         });
-        // Dedupe: the platform chords (Ctrl+C/X/V) can surface both as a
-        // consumed shortcut and as a clipboard event in the same frame.
         for cmd in clipboard {
             if !cmds.contains(&cmd) {
                 cmds.push(cmd);
             }
         }
+        // Ctrl+scroll zooms, like Excel.
+        let (scroll, ctrl) = ctx.input(|i| (i.raw_scroll_delta.y, i.modifiers.ctrl));
+        if ctrl && scroll.abs() > 0.5 {
+            cmds.push(if scroll > 0.0 {
+                Command::ZoomIn
+            } else {
+                Command::ZoomOut
+            });
+        }
+        // Typing a printable character starts editing the active cell,
+        // replacing its content — Excel's "Enter mode".
         if !typed.is_empty() && !typed.chars().all(char::is_control) {
-            self.start_edit(typed, true);
+            self.begin_edit(typed, EditMode::Enter);
         }
         cmds
     }
 
-    // ----- UI panels -----
+    // ----- editing entry points (shared with ui::editor) -----
 
-    /// Excel-style ribbon button: large icon on top, label below, both
-    /// horizontally centered; the whole area is clickable.
-    fn ribbon_button(
-        &self,
-        ui: &mut Ui,
-        icon: &str,
-        label: &str,
-        cmd: Command,
-        out: &mut Vec<Command>,
-    ) {
-        let icon_font = FontId::proportional(20.0);
-        let label_font = FontId::proportional(10.5);
-        let text_w = ui
-            .painter()
-            .layout_no_wrap(label.to_owned(), label_font.clone(), egui::Color32::WHITE)
-            .size()
-            .x;
-        let size = Vec2::new((text_w + 14.0).max(48.0), 48.0);
-        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-        let visuals = ui.style().interact(&resp);
-        if resp.hovered() || resp.is_pointer_button_down_on() {
-            ui.painter().rect_filled(rect, 4.0, visuals.weak_bg_fill);
+    pub fn begin_edit(&mut self, text: String, mode: EditMode) {
+        self.anchor = self.cursor;
+        self.edit = Some(EditState::new(
+            self.cursor.0,
+            self.cursor.1,
+            text,
+            mode,
+            false,
+        ));
+    }
+
+    pub fn commit_edit(&mut self, row: i32, col: i32, text: &str) {
+        let sheet = self.sheet;
+        let result = self.engine.set_input(sheet, row, col, text.trim_end());
+        self.report("Edit", result);
+        self.invalidate_geometry();
+    }
+}
+
+impl eframe::App for SheetzApp {
+    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Intercept window close while there are unsaved changes.
+        if ctx.input(|i| i.viewport().close_requested()) && self.engine.dirty && !self.allow_close {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            self.pending = Some(Pending::Quit);
         }
-        let color = visuals.text_color();
-        ui.painter().text(
-            Pos2::new(rect.center().x, rect.min.y + 4.0),
-            Align2::CENTER_TOP,
-            icon,
-            icon_font,
-            color,
-        );
-        ui.painter().text(
-            Pos2::new(rect.center().x, rect.max.y - 4.0),
-            Align2::CENTER_BOTTOM,
-            label,
-            label_font,
-            color,
-        );
-        let resp = match self.keymap.shortcut_for(cmd) {
-            Some(sc) => resp.on_hover_text(ui.ctx().format_shortcut(&sc)),
-            None => resp,
-        };
-        if resp.clicked() {
-            out.push(cmd);
-        }
-    }
 
-    /// A cluster of ribbon buttons with the group caption centered underneath.
-    fn ribbon_group(
-        &self,
-        ui: &mut Ui,
-        caption: &str,
-        items: &[(&str, &str, Command)],
-        out: &mut Vec<Command>,
-    ) {
-        ui.vertical(|ui| {
-            let row = ui
-                .horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 2.0;
-                    for (icon, label, cmd) in items {
-                        self.ribbon_button(ui, icon, label, *cmd, out);
-                    }
-                })
-                .response
-                .rect;
-            let (caption_rect, _) = ui.allocate_exact_size(
-                Vec2::new(row.width(), 14.0),
-                Sense::hover(),
-            );
-            ui.painter().text(
-                Pos2::new(row.center().x, caption_rect.center().y),
-                Align2::CENTER_CENTER,
-                caption,
-                FontId::proportional(10.0),
-                ui.visuals().weak_text_color(),
-            );
-        });
-        ui.separator();
-    }
-
-    fn ribbon(&mut self, ctx: &Context) -> Vec<Command> {
-        let mut cmds = Vec::new();
-        egui::TopBottomPanel::top("ribbon").show(ctx, |ui| {
-            // Tab strip. File opens the full-screen backstage view (like
-            // Excel); the other tabs switch the ribbon content below.
-            ui.horizontal(|ui| {
-                if ui.selectable_label(false, "File").clicked() {
-                    self.backstage = true;
-                }
-                for (tab, label) in [
-                    (RibbonTab::Home, "Home"),
-                    (RibbonTab::Sheet, "Sheet"),
-                    (RibbonTab::Help, "Help"),
-                ] {
-                    if ui.selectable_label(self.ribbon_tab == tab, label).clicked() {
-                        self.ribbon_tab = tab;
-                    }
-                }
-            });
-            ui.separator();
-            ui.horizontal(|ui| match self.ribbon_tab {
-                RibbonTab::Home => {
-                    self.ribbon_group(
-                        ui,
-                        "Clipboard",
-                        &[
-                            ("✂", "Cut", Command::Cut),
-                            ("⧉", "Copy", Command::Copy),
-                            ("📋", "Paste", Command::Paste),
-                        ],
-                        &mut cmds,
-                    );
-                    self.ribbon_group(
-                        ui,
-                        "History",
-                        &[
-                            ("⟲", "Undo", Command::Undo),
-                            ("⟳", "Redo", Command::Redo),
-                        ],
-                        &mut cmds,
-                    );
-                    self.ribbon_group(
-                        ui,
-                        "Editing",
-                        &[
-                            ("⌫", "Clear", Command::Clear),
-                            ("⬇", "Fill Down", Command::FillDown),
-                            ("➡", "Fill Right", Command::FillRight),
-                            ("▦", "Select All", Command::SelectAll),
-                        ],
-                        &mut cmds,
-                    );
-                }
-                RibbonTab::Sheet => {
-                    self.ribbon_group(
-                        ui,
-                        "Sheets",
-                        &[
-                            ("＋", "New Sheet", Command::NewSheet),
-                            ("◀", "Previous", Command::PrevSheet),
-                            ("▶", "Next", Command::NextSheet),
-                        ],
-                        &mut cmds,
-                    );
-                }
-                RibbonTab::Help => {
-                    ui.vertical(|ui| {
-                        ui.label(format!("Keymap: {}", self.keymap.source));
-                        ui.label(
-                            egui::RichText::new(
-                                "Edit keymap.toml to customize shortcuts (Excel defaults built in).",
-                            )
-                            .weak()
-                            .small(),
-                        );
-                    });
-                }
-            });
-            ui.add_space(2.0);
-        });
-        cmds
-    }
-
-    fn formula_bar(&mut self, ctx: &Context) {
-        egui::TopBottomPanel::top("formulabar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let name = format!(
-                    "{}{}",
-                    number_to_column(self.cursor.1).unwrap_or_default(),
-                    self.cursor.0
-                );
-                ui.add_sized([70.0, 20.0], egui::Label::new(egui::RichText::new(name).monospace()));
-                ui.separator();
-                let editing_here = self
-                    .edit
-                    .as_ref()
-                    .map(|e| e.in_formula_bar)
-                    .unwrap_or(false);
-                let mut shown = match &self.edit {
-                    Some(edit) => edit.text.clone(),
-                    None => self.engine.content(self.sheet, self.cursor.0, self.cursor.1),
-                };
-                let resp = ui.add_sized(
-                    [ui.available_width(), 20.0],
-                    TextEdit::singleline(&mut shown).font(FontId::monospace(CELL_FONT)),
-                );
-                if resp.gained_focus() && self.edit.is_none() {
-                    self.anchor = self.cursor;
-                    self.edit = Some(EditState {
-                        row: self.cursor.0,
-                        col: self.cursor.1,
-                        text: shown.clone(),
-                        take_focus: false,
-                        caret_end: false,
-                        in_formula_bar: true,
-                    });
-                }
-                if editing_here {
-                    if let Some(edit) = &mut self.edit {
-                        edit.text = shown;
-                    }
-                    if resp.lost_focus() {
-                        let edit = self.edit.take().unwrap();
-                        let (esc, enter) = ui.input(|i| {
-                            (i.key_pressed(Key::Escape), i.key_pressed(Key::Enter))
-                        });
-                        if !esc {
-                            self.commit_edit(&edit);
-                            if enter {
-                                self.move_cursor(1, 0, false);
-                            }
-                        }
-                    }
-                } else if self.edit.is_some() && !editing_here {
-                    // Mirror only; cell editor owns the text.
-                }
-            });
-        });
-    }
-
-    fn sheet_tabs(&mut self, ctx: &Context) {
-        egui::TopBottomPanel::bottom("tabs").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let names = self.engine.sheet_names();
-                let mut switch = None;
-                for (i, name) in names.iter().enumerate() {
-                    if ui
-                        .selectable_label(i as u32 == self.sheet, name)
-                        .clicked()
-                    {
-                        switch = Some(i as u32);
-                    }
-                }
-                if ui.button("+").on_hover_text("New sheet").clicked() {
-                    if self.engine.new_sheet().is_ok() {
-                        switch = Some(names.len() as u32);
-                    }
-                }
-                if let Some(s) = switch {
-                    self.switch_sheet(s);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new(&self.status).weak());
-                });
-            });
-        });
-    }
-
-    fn confirm_dialog(&mut self, ctx: &Context) {
-        let Some(action) = self.pending.clone() else { return };
-        let mut choice: Option<&str> = None;
-        egui::Window::new("Unsaved changes")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label("This workbook has unsaved changes.");
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
-                        choice = Some("save");
-                    }
-                    if ui.button("Discard").clicked() {
-                        choice = Some("discard");
-                    }
-                    if ui.button("Cancel").clicked() {
-                        choice = Some("cancel");
-                    }
-                });
-            });
-        match choice {
-            Some("save") => {
-                self.pending = None;
-                if self.do_save() {
-                    self.run_pending(action, ctx);
-                }
+        if self.backstage {
+            let cmds = self.backstage_ui(ctx);
+            for cmd in cmds {
+                self.exec(cmd, ctx);
             }
-            Some("discard") => {
-                self.pending = None;
-                self.run_pending(action, ctx);
-            }
-            Some("cancel") => self.pending = None,
-            _ => {}
-        }
-    }
-
-    // ----- grid -----
-
-    fn grid(&mut self, ctx: &Context) {
-        let bg = ctx.style().visuals.panel_fill;
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(bg))
-            .show(ctx, |ui| {
-                let avail = ui.available_rect_before_wrap();
-                let grid_rect = Rect::from_min_max(
-                    Pos2::new(avail.min.x + GUTTER_W, avail.min.y + HEADER_H),
-                    avail.max,
-                );
-                self.rows_per_page = ((grid_rect.height() / 21.0) as i32 - 1).max(1);
-
-                let mut grid_ui = ui.new_child(UiBuilder::new().max_rect(grid_rect));
-                grid_ui.set_clip_rect(grid_rect);
-                let output = ScrollArea::both()
-                    .auto_shrink([false, false])
-                    .show_viewport(&mut grid_ui, |ui, viewport| {
-                        self.grid_contents(ui, viewport);
-                    });
-                let offset = output.state.offset;
-
-                self.headers(ui, avail, grid_rect, offset);
-                self.edit_overlay(ctx, grid_rect, offset);
-            });
-    }
-
-    fn grid_contents(&mut self, ui: &mut Ui, viewport: Rect) {
-        self.ensure_geometry();
-        let total = Vec2::new(
-            self.col_off[self.view_cols as usize],
-            self.row_off[self.view_rows as usize],
-        );
-        ui.set_min_size(total);
-        let origin = ui.min_rect().min;
-
-        // Visible cell range.
-        let r0 = self.row_off.partition_point(|&y| y <= viewport.min.y).max(1) as i32;
-        let r1 = (self.row_off.partition_point(|&y| y < viewport.max.y) as i32)
-            .clamp(r0, self.view_rows);
-        let c0 = self.col_off.partition_point(|&x| x <= viewport.min.x).max(1) as i32;
-        let c1 = (self.col_off.partition_point(|&x| x < viewport.max.x) as i32)
-            .clamp(c0, self.view_cols);
-
-        // Interaction covers the whole (virtual) grid.
-        let response = ui.interact(
-            Rect::from_min_size(origin, total),
-            Id::new("sheetz-grid"),
-            Sense::click_and_drag(),
-        );
-        let shift = ui.input(|i| i.modifiers.shift);
-        if let Some(pos) = response.interact_pointer_pos() {
-            let cell = self.cell_at(pos, origin);
-            if response.double_clicked() {
-                self.set_cursor(cell.0, cell.1);
-                let text = self.engine.content(self.sheet, cell.0, cell.1);
-                self.start_edit(text, true);
-            } else if response.drag_started() || response.clicked() {
-                self.cursor = cell;
-                if !shift {
-                    self.anchor = cell;
-                }
-            } else if response.dragged() {
-                self.cursor = cell;
-            }
-        }
-
-        let visuals = ui.visuals().clone();
-        let painter = ui.painter().clone();
-        let accent = visuals.selection.bg_fill;
-        let grid_line = Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color);
-
-        // Selection background.
-        let (sr0, sr1, sc0, sc1) = self.selection();
-        if sr1 >= r0 && sr0 <= r1 && sc1 >= c0 && sc0 <= c1 {
-            let rect = Rect::from_min_max(
-                self.cell_rect(sr0.max(1), sc0.max(1), origin).min,
-                self.cell_rect(sr1.min(self.view_rows), sc1.min(self.view_cols), origin).max,
-            );
-            painter.rect_filled(rect, 0.0, accent.linear_multiply(0.18));
-        }
-
-        // Grid lines.
-        let x_min = origin.x + viewport.min.x.max(0.0);
-        let x_max = origin.x + viewport.max.x.min(total.x);
-        let y_min = origin.y + viewport.min.y.max(0.0);
-        let y_max = origin.y + viewport.max.y.min(total.y);
-        for r in (r0 - 1)..=r1 {
-            let y = origin.y + self.row_off[r as usize];
-            painter.hline(x_min..=x_max, y, grid_line);
-        }
-        for c in (c0 - 1)..=c1 {
-            let x = origin.x + self.col_off[c as usize];
-            painter.vline(x, y_min..=y_max, grid_line);
-        }
-
-        // Cell contents.
-        let font = FontId::proportional(CELL_FONT);
-        let text_color = visuals.text_color();
-        for r in r0..=r1 {
-            for c in c0..=c1 {
-                let text = self.engine.display(self.sheet, r, c);
-                if text.is_empty() {
-                    continue;
-                }
-                let rect = self.cell_rect(r, c, origin);
-                let clipped = painter.with_clip_rect(rect.intersect(ui.clip_rect()));
-                if self.engine.is_number(self.sheet, r, c) {
-                    clipped.text(
-                        Pos2::new(rect.max.x - CELL_PAD, rect.center().y),
-                        Align2::RIGHT_CENTER,
-                        text,
-                        font.clone(),
-                        text_color,
-                    );
-                } else {
-                    clipped.text(
-                        Pos2::new(rect.min.x + CELL_PAD, rect.center().y),
-                        Align2::LEFT_CENTER,
-                        text,
-                        font.clone(),
-                        text_color,
-                    );
-                }
-            }
-        }
-
-        // Active cell border.
-        let active = self.cell_rect(self.cursor.0, self.cursor.1, origin);
-        painter.rect_stroke(
-            active,
-            CornerRadius::ZERO,
-            Stroke::new(2.0, accent),
-            egui::StrokeKind::Inside,
-        );
-
-        if self.scroll_to_cursor {
-            ui.scroll_to_rect(active.expand(2.0), None);
-            self.scroll_to_cursor = false;
-        }
-    }
-
-    fn headers(&mut self, ui: &mut Ui, avail: Rect, grid_rect: Rect, offset: Vec2) {
-        let visuals = ui.visuals().clone();
-        let bg = visuals.faint_bg_color;
-        let line = Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color);
-        let font = FontId::proportional(12.0);
-        let text_color = visuals.text_color();
-        let accent = visuals.selection.bg_fill;
-        let (sr0, sr1, sc0, sc1) = self.selection();
-
-        // Column header strip.
-        let col_hdr = Rect::from_min_max(
-            Pos2::new(grid_rect.min.x, avail.min.y),
-            Pos2::new(avail.max.x, avail.min.y + HEADER_H),
-        );
-        let painter = ui.painter().with_clip_rect(col_hdr);
-        painter.rect_filled(col_hdr, 0.0, bg);
-        let c0 = self.col_off.partition_point(|&x| x <= offset.x).max(1) as i32;
-        let c1 = (self
-            .col_off
-            .partition_point(|&x| x < offset.x + col_hdr.width()) as i32)
-            .clamp(c0, self.view_cols);
-        for c in c0..=c1 {
-            let x0 = grid_rect.min.x + self.col_off[c as usize - 1] - offset.x;
-            let x1 = grid_rect.min.x + self.col_off[c as usize] - offset.x;
-            let rect = Rect::from_min_max(
-                Pos2::new(x0, col_hdr.min.y),
-                Pos2::new(x1, col_hdr.max.y),
-            );
-            if c >= sc0 && c <= sc1 {
-                painter.rect_filled(rect, 0.0, accent.linear_multiply(0.25));
-            }
-            painter.vline(x1, col_hdr.min.y..=col_hdr.max.y, line);
-            painter.text(
-                rect.center(),
-                Align2::CENTER_CENTER,
-                number_to_column(c).unwrap_or_default(),
-                font.clone(),
-                text_color,
-            );
-        }
-        painter.hline(col_hdr.min.x..=col_hdr.max.x, col_hdr.max.y, line);
-
-        // Row number gutter.
-        let row_hdr = Rect::from_min_max(
-            Pos2::new(avail.min.x, grid_rect.min.y),
-            Pos2::new(avail.min.x + GUTTER_W, avail.max.y),
-        );
-        let painter = ui.painter().with_clip_rect(row_hdr);
-        painter.rect_filled(row_hdr, 0.0, bg);
-        let r0 = self.row_off.partition_point(|&y| y <= offset.y).max(1) as i32;
-        let r1 = (self
-            .row_off
-            .partition_point(|&y| y < offset.y + row_hdr.height()) as i32)
-            .clamp(r0, self.view_rows);
-        for r in r0..=r1 {
-            let y0 = grid_rect.min.y + self.row_off[r as usize - 1] - offset.y;
-            let y1 = grid_rect.min.y + self.row_off[r as usize] - offset.y;
-            let rect = Rect::from_min_max(
-                Pos2::new(row_hdr.min.x, y0),
-                Pos2::new(row_hdr.max.x, y1),
-            );
-            if r >= sr0 && r <= sr1 {
-                painter.rect_filled(rect, 0.0, accent.linear_multiply(0.25));
-            }
-            painter.hline(row_hdr.min.x..=row_hdr.max.x, y1, line);
-            painter.text(
-                rect.center(),
-                Align2::CENTER_CENTER,
-                r.to_string(),
-                font.clone(),
-                text_color,
-            );
-        }
-        painter.vline(row_hdr.max.x, row_hdr.min.y..=row_hdr.max.y, line);
-
-        // Corner box.
-        let corner = Rect::from_min_size(avail.min, Vec2::new(GUTTER_W, HEADER_H));
-        let painter = ui.painter().with_clip_rect(corner);
-        painter.rect_filled(corner, 0.0, bg);
-        painter.hline(corner.min.x..=corner.max.x, corner.max.y, line);
-        painter.vline(corner.max.x, corner.min.y..=corner.max.y, line);
-    }
-
-    fn edit_overlay(&mut self, ctx: &Context, grid_rect: Rect, offset: Vec2) {
-        let Some(edit) = &self.edit else { return };
-        if edit.in_formula_bar {
+            self.confirm_dialog(ctx);
+            self.update_title(ctx);
             return;
         }
-        let (row, col) = (edit.row, edit.col);
-        let r = row as usize;
-        let c = col as usize;
-        if r >= self.row_off.len() || c >= self.col_off.len() {
-            return;
-        }
-        let min = Pos2::new(
-            grid_rect.min.x + self.col_off[c - 1] - offset.x,
-            grid_rect.min.y + self.row_off[r - 1] - offset.y,
-        );
-        let size = Vec2::new(
-            (self.col_off[c] - self.col_off[c - 1]).max(120.0),
-            self.row_off[r] - self.row_off[r - 1],
-        );
 
-        let mut committed = false;
-        let mut cancelled = false;
-        let mut move_after: Option<(i32, i32)> = None;
+        let mut cmds = self.collect_input(ctx);
+        cmds.extend(self.ribbon(ctx));
+        cmds.extend(self.dialogs(ctx));
 
-        egui::Area::new(Id::new("sheetz-cell-edit"))
-            .fixed_pos(min)
-            .order(Order::Foreground)
-            .show(ctx, |ui| {
-                let edit = self.edit.as_mut().unwrap();
-                let resp = ui.add(
-                    TextEdit::singleline(&mut edit.text)
-                        .font(FontId::proportional(CELL_FONT))
-                        .min_size(size)
-                        .vertical_align(egui::Align::Center),
-                );
-                if edit.take_focus {
-                    resp.request_focus();
-                    if edit.caret_end {
-                        // Place the caret at the end instead of select-all.
-                        let id = resp.id;
-                        if let Some(mut state) = TextEdit::load_state(ctx, id) {
-                            let end = egui::text::CCursor::new(edit.text.chars().count());
-                            state
-                                .cursor
-                                .set_char_range(Some(egui::text::CCursorRange::one(end)));
-                            state.store(ctx, id);
-                        }
-                    }
-                    edit.take_focus = false;
-                }
-                if resp.lost_focus() {
-                    let (esc, enter, tab, shift) = ui.input(|i| {
-                        (
-                            i.key_pressed(Key::Escape),
-                            i.key_pressed(Key::Enter),
-                            i.key_pressed(Key::Tab),
-                            i.modifiers.shift,
-                        )
-                    });
-                    if esc {
-                        cancelled = true;
-                    } else {
-                        committed = true;
-                        if enter {
-                            move_after = Some(if shift { (-1, 0) } else { (1, 0) });
-                        } else if tab {
-                            move_after = Some(if shift { (0, -1) } else { (0, 1) });
-                        }
-                    }
-                }
-            });
+        self.formula_bar(ctx);
+        self.status_bar(ctx);
+        self.sheet_tabs(ctx);
+        cmds.extend(self.grid(ctx));
 
-        if committed || cancelled {
-            let edit = self.edit.take().unwrap();
-            if committed {
-                self.commit_edit(&edit);
-            }
-            if let Some((dr, dc)) = move_after {
-                self.move_cursor(dr, dc, false);
-            }
-        }
-    }
-
-    /// Full-screen File view (Excel's "backstage"): nav sidebar on the left,
-    /// workbook info and recent files on the right.
-    fn backstage_ui(&mut self, ctx: &Context) {
-        if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            self.backstage = false;
-            return;
-        }
-        let mut action: Option<Command> = None;
-        let mut open_recent: Option<PathBuf> = None;
-
-        egui::SidePanel::left("backstage-nav")
-            .resizable(false)
-            .exact_width(190.0)
-            .show(ctx, |ui| {
-                ui.add_space(8.0);
-                if ui
-                    .add(egui::Button::new(egui::RichText::new("←  Back").size(16.0)).frame(false))
-                    .clicked()
-                {
-                    self.backstage = false;
-                }
-                ui.add_space(16.0);
-                for (label, cmd) in [
-                    ("🗋  New", Command::New),
-                    ("🗁  Open…", Command::Open),
-                    ("💾  Save", Command::Save),
-                    ("🗐  Save As…", Command::SaveAs),
-                ] {
-                    let mut resp = ui.add_sized(
-                        [ui.available_width(), 34.0],
-                        egui::Button::new(egui::RichText::new(label).size(14.0)),
-                    );
-                    if let Some(sc) = self.keymap.shortcut_for(cmd) {
-                        resp = resp.on_hover_text(ui.ctx().format_shortcut(&sc));
-                    }
-                    if resp.clicked() {
-                        action = Some(cmd);
-                    }
-                    ui.add_space(4.0);
-                }
-                ui.add_space(12.0);
-                ui.separator();
-                ui.add_space(12.0);
-                if ui
-                    .add_sized(
-                        [ui.available_width(), 34.0],
-                        egui::Button::new(egui::RichText::new("✖  Quit").size(14.0)),
-                    )
-                    .clicked()
-                {
-                    action = Some(Command::Quit);
-                }
-            });
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(8.0);
-            ui.heading("Info");
-            ui.add_space(4.0);
-            match &self.engine.path {
-                Some(p) => {
-                    ui.label(
-                        egui::RichText::new(
-                            p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
-                        )
-                        .strong(),
-                    );
-                    ui.label(egui::RichText::new(p.display().to_string()).weak());
-                }
-                None => {
-                    ui.label(egui::RichText::new("Book1").strong());
-                    ui.label(egui::RichText::new("Not saved yet").weak());
-                }
-            }
-            ui.label(format!(
-                "{} sheet(s){}",
-                self.engine.sheet_names().len(),
-                if self.engine.dirty {
-                    " — unsaved changes"
-                } else {
-                    ""
-                }
-            ));
-            ui.add_space(16.0);
-            ui.heading("Recent");
-            ui.add_space(4.0);
-            if self.recent.is_empty() {
-                ui.label(egui::RichText::new("No recent files.").weak());
-            }
-            for path in &self.recent {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string());
-                let resp = ui.link(name).on_hover_text(path.display().to_string());
-                if resp.clicked() {
-                    open_recent = Some(path.clone());
-                }
-            }
-        });
-
-        if let Some(cmd) = action {
-            self.backstage = false;
+        for cmd in cmds {
             self.exec(cmd, ctx);
         }
-        if let Some(path) = open_recent {
-            self.backstage = false;
-            if self.engine.dirty {
-                self.pending = Some(Pending::OpenPath(path));
-            } else {
-                self.open_path(path);
-            }
-        }
-    }
 
+        self.confirm_dialog(ctx);
+        self.update_title(ctx);
+    }
+}
+
+impl SheetzApp {
     fn update_title(&mut self, ctx: &Context) {
         let name = self
             .engine
@@ -1374,36 +1006,6 @@ impl SheetzApp {
     }
 }
 
-impl eframe::App for SheetzApp {
-    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        // Intercept window close while there are unsaved changes.
-        if ctx.input(|i| i.viewport().close_requested()) && self.engine.dirty && !self.allow_close
-        {
-            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            self.pending = Some(Pending::Quit);
-        }
-
-        if self.backstage {
-            self.backstage_ui(ctx);
-            self.confirm_dialog(ctx);
-            self.update_title(ctx);
-            return;
-        }
-
-        let mut cmds = self.collect_input(ctx);
-        cmds.extend(self.ribbon(ctx));
-        for cmd in cmds {
-            self.exec(cmd, ctx);
-        }
-
-        self.formula_bar(ctx);
-        self.sheet_tabs(ctx);
-        self.grid(ctx);
-        self.confirm_dialog(ctx);
-        self.update_title(ctx);
-    }
-}
-
 /// One axis of Excel's Ctrl+Arrow "jump to data boundary".
 /// `far` is the sheet edge in that direction; `scan_end` is the last position
 /// worth scanning (the used range).
@@ -1420,14 +1022,12 @@ fn jump_axis(start: i32, dir: i32, far: i32, scan_end: i32, filled: impl Fn(i32)
         return far;
     }
     if filled(start) && filled(next) {
-        // Run to the end of the contiguous filled block.
         let mut i = next;
         while in_range(i + dir) && filled(i + dir) {
             i += dir;
         }
         i
     } else {
-        // Skip blanks to the next filled cell; land on the sheet edge if none.
         let mut i = next;
         while in_range(i) {
             if filled(i) {
@@ -1436,5 +1036,30 @@ fn jump_axis(start: i32, dir: i32, far: i32, scan_end: i32, filled: impl Fn(i32)
             i += dir;
         }
         far
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::jump_axis;
+
+    #[test]
+    fn jump_from_filled_block_stops_at_its_end() {
+        // Cells 1..3 filled, 4+ empty. From 1 going down we land on 3.
+        let filled = |i: i32| (1..=3).contains(&i);
+        assert_eq!(jump_axis(1, 1, 1_048_576, 3, filled), 3);
+    }
+
+    #[test]
+    fn jump_over_blanks_lands_on_next_filled() {
+        // 1 filled, 2-3 blank, 4 filled.
+        let filled = |i: i32| i == 1 || i == 4;
+        assert_eq!(jump_axis(1, 1, 1_048_576, 4, filled), 4);
+    }
+
+    #[test]
+    fn jump_with_no_data_hits_the_sheet_edge() {
+        assert_eq!(jump_axis(5, 1, 1_048_576, 1, |_| false), 1_048_576);
+        assert_eq!(jump_axis(5, -1, 1, 1, |_| false), 1);
     }
 }
