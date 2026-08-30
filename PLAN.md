@@ -4,7 +4,6 @@ Guiding principle: parity in the order people actually use Excel. Roughly 90%
 of spreadsheet time is formatting, navigation, basic formulas, sort/filter,
 and charts — that's v0.2–v0.4. Pivot tables and automation are the long tail.
 
-Effort: **S** = a day-ish, **M** = a week-ish, **L** = multi-week.
 "IC" notes what the IronCalc engine already provides vs. what we build.
 
 ## Architecture (done)
@@ -68,8 +67,8 @@ Effort: **S** = a day-ish, **M** = a week-ish, **L** = multi-week.
       choose, Tab/Enter to accept.
 - [x] **Multi-key sort** — up to three levels, ascending/descending each,
       blanks last.
-- [ ] **Data validation** — dropdown lists first (L)
-- [ ] **Multi-range selection** — Ctrl+click disjoint ranges (M)
+- [ ] **Data validation** — dropdown lists first
+- [ ] **Multi-range selection** — Ctrl+click disjoint ranges
 
 ## v0.5 — Shows data (visual layer)
 
@@ -83,16 +82,101 @@ Effort: **S** = a day-ish, **M** = a week-ish, **L** = multi-week.
 - [x] **Data bars** — painted behind cell text from the engine's evaluated
       conditional formatting.
 - [ ] **Charts in xlsx** — reading/writing chart XML so charts survive a round
-      trip (L; native charts are view-only today)
-- [ ] **Comments/notes** (M), **hyperlinks** (S)
+      trip; native charts are view-only today
+- [ ] **Comments/notes**, **hyperlinks**
 
-## v0.6+ — The long tail
+## v0.6 — LLM-operable, live (MCP)
 
-- [ ] **Pivot tables** — read existing first, then create/edit (L, multi-step)
-- [ ] **Print / export PDF** — page setup, print areas (L)
-- [ ] **Images in sheets** (M)
-- [ ] **Workbook protection** (M)
-- [ ] **Goal seek** (M)
+The goal: a non-technical person talks to Claude/GPT ("log that I applied to
+Acme today", "which applications haven't replied in two weeks?") and watches
+their real spreadsheet update in front of them. The assistant maintains the
+file over months; the human stays in control and can always undo.
+
+That rules out a headless server: the model edits **the workbook already open
+in the GUI**, and every change is visible immediately.
+
+### Transport — the live bridge
+
+MCP clients launch a server and speak newline-delimited JSON-RPC 2.0 over
+stdio, so the running GUI can't be the server directly (its stdio isn't the
+client's). Three pieces:
+
+- [ ] **Socket server inside the app** — a background thread accepting on
+      `$XDG_RUNTIME_DIR/sheetz.sock`, parsing JSON-RPC.
+- [ ] **Commands marshalled onto the UI thread** — the socket thread sends a
+      request plus a reply channel; `update()` drains the queue, applies it to
+      the `Engine` and replies. `Context::request_repaint()` (Send + Sync) wakes
+      the loop, so edits land even while the app sits idle.
+- [ ] **`sheetz mcp` stdio shim** — the tiny binary the MCP client actually
+      launches. Connects to the socket and proxies both directions; starts the
+      GUI itself if it isn't running, so the user never has to.
+- [ ] Protocol layer: `initialize`, `ping`, `tools/list`, `tools/call`, tool
+      failures as `isError` results rather than protocol errors. Hand-rolled,
+      no framework, ~100 lines (the shape is proven in viode's `viode-mcp`).
+- [ ] `.mcp.json` plus an end-to-end test that spawns the shim and speaks
+      JSON-RPC exactly as a client would.
+
+### Tools the assistant needs
+
+Raw cell addressing is not enough — asking a model to compute "row 14, column
+D" is where it will make mistakes. Sheets that hold records get record-shaped
+tools on top of the cell-level ones.
+
+- [ ] **Discovery** — `workbook_info` (sheets, used ranges, dirty state, path),
+      `sheet_read` returning a *window* with values and optionally formulas.
+      Hard cap the cell count and default to the used range; a naive
+      "read the sheet" on a million rows must be impossible.
+- [ ] **Cell level** — `cell_set`, `range_set`, `range_format`,
+      `rows_insert/delete`, `cols_insert/delete`, `sheet_add/rename/delete` —
+      one-liners over `engine.rs`.
+- [ ] **Record level** — treat a header row as a schema: `table_schema`,
+      `table_append(record)`, `table_find(criteria)`, `table_update(match,
+      changes)`. This is what makes "mark the Acme application as rejected"
+      reliable instead of a guess about coordinates.
+- [ ] **Templates** — `workbook_from_template("job-applications" | "budget" |
+      …)`: headers, formats, freeze, filter, a couple of summary formulas. Gets
+      a useful file existing in one turn.
+- [ ] **Query** — `stats`, `find`, `sort_range`, `filter` so the model can
+      answer questions without dragging the whole sheet into its context.
+
+### Trust, safety and visibility
+
+The point of doing this in a visible GUI is that the human stays in the loop.
+
+- [ ] **Change highlighting** — cells the assistant just wrote get a temporary
+      tint that fades, so you can see what it touched at a glance.
+- [ ] **Activity log** — a side panel listing each tool call in plain English
+      ("added row 12: Acme, Applied, 2026-08-30"), with the range it touched.
+- [ ] **One tool call = one undo step** — group a call's edits into a single
+      history entry so Ctrl+Z undoes a whole assistant action, not a third of
+      one. Needs a transaction boundary in the engine layer.
+- [ ] **Destructive operations gated** — deleting sheets, clearing ranges or
+      overwriting non-empty blocks prompt for confirmation in the UI (or are
+      refused in an unattended mode). The model must not be able to quietly
+      destroy a year of records.
+- [ ] **Edit conflicts** — refuse (with a clear error the model can act on)
+      while the user has a cell editor open, rather than yanking it away.
+- [ ] **Save policy** — debounced autosave after assistant edits, since the
+      target user will not think to press Ctrl+S; explicit `workbook_save` too,
+      and never silently discard the human's unsaved work.
+- [ ] **Backups** — keep the previous version alongside the file before the
+      first assistant write of a session. Cheap insurance for a file someone
+      maintains for months.
+
+### Engine gaps this needs first
+
+- [ ] Make `parse_a1_range` public — tools should take `"B2:D9"`, not integers.
+- [ ] `read_range` returning a value grid in one call.
+- [ ] Sheet lookup by name, since tools take names and the engine takes indices.
+- [ ] Transaction begin/end around a batch of edits for the undo grouping.
+
+## v0.7+ — The long tail
+
+- [ ] **Pivot tables** — read existing first, then create/edit
+- [ ] **Print / export PDF** — page setup, print areas
+- [ ] **Images in sheets**
+- [ ] **Workbook protection**
+- [ ] **Goal seek**
 - [ ] **Scripting** — Rhai, not VBA. Explicit non-goal until the above ships.
 
 ## Engine parity track (continuous, upstream)
@@ -111,9 +195,9 @@ Same for xlsx fidelity bugs and for the missing merge-cells write API.
 - [x] Unit tests for A1 parsing, column names, jump-to-edge, replace; xlsx
       round-trip integration test.
 - [ ] Per-frame cell format cache (the grid currently queries the engine per
-      visible cell per frame) (S)
-- [ ] Packaging: `.desktop` file + icon, AUR PKGBUILD, release CI (S/M)
-- [ ] Chorded/multi-key bindings in the keymap (S)
+      visible cell per frame)
+- [ ] Packaging: `.desktop` file + icon, AUR PKGBUILD, release CI
+- [ ] Chorded/multi-key bindings in the keymap
 
 ## Explicit non-goals
 
