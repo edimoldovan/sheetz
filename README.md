@@ -151,3 +151,11 @@ cargo test
 Covers A1 parsing, column naming, jump-to-edge semantics, and engine-level
 integration tests for formulas, styles, structure edits, sorting, find and
 replace, the clipboard, conditional formatting and xlsx round-tripping.
+
+## License
+
+Copyright (c) 2026 Eduard Moldovan AB. All rights reserved.
+
+Licensed under the [PolyForm Free Trial License 1.0.0](LICENSE): free to
+evaluate for up to 32 consecutive days. Subscriptions and commercial terms at
+<https://eduardmoldovan.com/sheetz>.

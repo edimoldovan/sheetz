@@ -2,6 +2,10 @@
 name = "sheetz"
 version = "0.1.0"
 edition = "2024"
+license-file = "LICENSE"
+authors = ["Eduard Moldovan"]
+repository = "https://github.com/edimoldovan/sheetz"
+description = "A fast native spreadsheet for Linux, with an assistant that can maintain your files"
 
 [dependencies]
 anyhow = "1.0.104"
