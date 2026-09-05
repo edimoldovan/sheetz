@@ -100,6 +100,7 @@ impl SheetzApp {
             assistant_request: None,
             backed_up: false,
             show_activity: false,
+            theme_watcher: crate::theme::ThemeWatcher::new(),
             autosave_in: None,
         };
         if let Some(p) = &path {
@@ -1090,6 +1091,10 @@ impl SheetzApp {
 
 impl eframe::App for SheetzApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Restyle in place when the Omarchy theme changes under us.
+        if let Some(palette) = self.theme_watcher.changed(ctx) {
+            ctx.set_visuals(crate::theme::visuals(&palette));
+        }
         self.drain_assistant_calls();
         self.tick_autosave(ctx);
         self.tick_change_highlights(ctx);

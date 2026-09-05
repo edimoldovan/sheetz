@@ -7,10 +7,50 @@
 //! `draw` returns false for names it doesn't know, letting the caller fall
 //! back to rendering the name as text (used for "B", "I", "U", "$", "%", …).
 
+use std::cell::RefCell;
+
+use eframe::egui::emath::TSTransform;
 use eframe::egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 
 /// Draws `name` centered in `rect`. Returns false if there is no such icon.
+///
+/// Centering is *optical*: the ink the icon actually produces is measured and
+/// that bounding box is what lands in the middle. Each icon draws with its own
+/// internal margins, so centering the coordinate box (as this used to do)
+/// left some icons visibly high or low, with uneven gaps to the label below.
+/// Undersized glyphs are also gently scaled toward a shared visual size.
 pub fn draw(painter: &Painter, rect: Rect, name: &str, color: Color32) -> bool {
+    let Some(mut shapes) = build(rect, name, color) else {
+        return false;
+    };
+    center_optically(&mut shapes, rect);
+    painter.add(Shape::Vec(shapes));
+    true
+}
+
+/// Moves (and gently rescales) shapes so their combined ink is centered in
+/// `rect` at a consistent visual size.
+fn center_optically(shapes: &mut [Shape], rect: Rect) {
+    let mut bbox = Rect::NOTHING;
+    for shape in shapes.iter() {
+        bbox = bbox.union(shape.visual_bounding_rect());
+    }
+    if !bbox.is_positive() {
+        return;
+    }
+    let target = rect.width().min(rect.height()) * 0.82;
+    let extent = bbox.width().max(bbox.height()).max(1.0);
+    let scale = (target / extent).clamp(0.85, 1.3);
+    let translation = rect.center().to_vec2() - bbox.center().to_vec2() * scale;
+    let t = TSTransform::new(translation, scale);
+    for shape in shapes.iter_mut() {
+        shape.transform(t);
+    }
+}
+
+/// Builds the icon's shapes in `rect`'s coordinate box, or None for an
+/// unknown name.
+fn build(rect: Rect, name: &str, color: Color32) -> Option<Vec<Shape>> {
     // Work in a square box so icons keep their proportions.
     let side = rect.width().min(rect.height());
     let box_rect = Rect::from_center_size(rect.center(), Vec2::splat(side));
@@ -23,37 +63,48 @@ pub fn draw(painter: &Painter, rect: Rect, name: &str, color: Color32) -> bool {
     let thin = Stroke::new((side * 0.075).max(1.0), color);
     let thick = Stroke::new((side * 0.11).max(1.3), color);
 
-    let line = |a: (f32, f32), b: (f32, f32)| {
-        painter.line_segment([p(a.0, a.1), p(b.0, b.1)], thin);
-    };
-    let rect_outline = |x0: f32, y0: f32, x1: f32, y1: f32| {
-        painter.add(Shape::closed_line(
-            vec![p(x0, y0), p(x1, y0), p(x1, y1), p(x0, y1)],
-            thin,
-        ));
-    };
-    let rect_filled = |x0: f32, y0: f32, x1: f32, y1: f32| {
-        painter.rect_filled(Rect::from_min_max(p(x0, y0), p(x1, y1)), 0.0, color);
-    };
-    // Arrowhead pointing in a cardinal direction, centered on (x, y).
-    let arrow_head = |x: f32, y: f32, dx: f32, dy: f32, size: f32| {
-        let tip = p(x, y);
-        let back = Vec2::new(-dx, -dy) * size * box_rect.width();
-        let side_v = Vec2::new(-dy, dx) * size * 0.62 * box_rect.width();
-        painter.add(Shape::convex_polygon(
-            vec![tip, tip + back + side_v, tip + back - side_v],
-            color,
-            Stroke::NONE,
-        ));
-    };
+    let shapes = RefCell::new(Vec::new());
+    {
+        let push = |s: Shape| shapes.borrow_mut().push(s);
+        let seg = |pts: [Pos2; 2], stroke: Stroke| push(Shape::line_segment(pts, stroke));
+        let circle_stroke =
+            |c: Pos2, r: f32, stroke: Stroke| push(Shape::circle_stroke(c, r, stroke));
+        let circle_filled = |c: Pos2, r: f32| push(Shape::circle_filled(c, r, color));
+        let line = |a: (f32, f32), b: (f32, f32)| {
+            seg([p(a.0, a.1), p(b.0, b.1)], thin);
+        };
+        let rect_outline = |x0: f32, y0: f32, x1: f32, y1: f32| {
+            push(Shape::closed_line(
+                vec![p(x0, y0), p(x1, y0), p(x1, y1), p(x0, y1)],
+                thin,
+            ));
+        };
+        let rect_filled = |x0: f32, y0: f32, x1: f32, y1: f32| {
+            push(Shape::rect_filled(
+                Rect::from_min_max(p(x0, y0), p(x1, y1)),
+                0.0,
+                color,
+            ));
+        };
+        // Arrowhead pointing in a cardinal direction, centered on (x, y).
+        let arrow_head = |x: f32, y: f32, dx: f32, dy: f32, size: f32| {
+            let tip = p(x, y);
+            let back = Vec2::new(-dx, -dy) * size * box_rect.width();
+            let side_v = Vec2::new(-dy, dx) * size * 0.62 * box_rect.width();
+            push(Shape::convex_polygon(
+                vec![tip, tip + back + side_v, tip + back - side_v],
+                color,
+                Stroke::NONE,
+            ));
+        };
 
-    match name {
+        match name {
         // ----- clipboard -----
         "cut" => {
             line((0.28, 0.12), (0.66, 0.66));
             line((0.72, 0.12), (0.34, 0.66));
-            painter.circle_stroke(p(0.30, 0.80), side * 0.11, thin);
-            painter.circle_stroke(p(0.70, 0.80), side * 0.11, thin);
+            circle_stroke(p(0.30, 0.80), side * 0.11, thin);
+            circle_stroke(p(0.70, 0.80), side * 0.11, thin);
         }
         "copy" => {
             rect_outline(0.16, 0.10, 0.62, 0.68);
@@ -75,7 +126,7 @@ pub fn draw(painter: &Painter, rect: Rect, name: &str, color: Color32) -> bool {
                     "align-right" => (0.84 - w, 0.84),
                     _ => (0.5 - w / 2.0, 0.5 + w / 2.0),
                 };
-                painter.line_segment(
+                seg(
                     [p(x0, *y), p(x1, *y)],
                     Stroke::new((side * 0.085).max(1.0), color),
                 );
@@ -84,7 +135,7 @@ pub fn draw(painter: &Painter, rect: Rect, name: &str, color: Color32) -> bool {
         "wrap" => {
             line((0.16, 0.28), (0.84, 0.28));
             line((0.16, 0.52), (0.68, 0.52));
-            painter.add(Shape::line(
+            push(Shape::line(
                 vec![p(0.68, 0.52), p(0.80, 0.52), p(0.80, 0.72), p(0.40, 0.72)],
                 thin,
             ));
@@ -99,12 +150,7 @@ pub fn draw(painter: &Painter, rect: Rect, name: &str, color: Color32) -> bool {
         }
         "clear" => {
             // Eraser: a rounded block with a wipe stroke.
-            painter.rect_stroke(
-                Rect::from_min_max(p(0.16, 0.30), p(0.72, 0.70)),
-                eframe::egui::CornerRadius::same(2),
-                thin,
-                eframe::egui::StrokeKind::Inside,
-            );
+            rect_outline(0.16, 0.30, 0.72, 0.70);
             line((0.60, 0.22), (0.88, 0.50));
             line((0.76, 0.78), (0.90, 0.92));
             line((0.90, 0.78), (0.76, 0.92));
@@ -144,31 +190,31 @@ pub fn draw(painter: &Painter, rect: Rect, name: &str, color: Color32) -> bool {
             for (i, w) in widths.iter().enumerate() {
                 let y = 0.24 + i as f32 * 0.24;
                 let w = if down { widths[2 - i] } else { *w };
-                painter.line_segment([p(0.14, y), p(0.14 + w, y)], thin);
+                seg([p(0.14, y), p(0.14 + w, y)], thin);
             }
         }
         "filter" => {
-            painter.add(Shape::convex_polygon(
+            push(Shape::convex_polygon(
                 vec![p(0.12, 0.18), p(0.88, 0.18), p(0.58, 0.52), p(0.42, 0.52)],
                 color,
                 Stroke::NONE,
             ));
-            painter.add(Shape::convex_polygon(
+            push(Shape::convex_polygon(
                 vec![p(0.42, 0.56), p(0.58, 0.56), p(0.55, 0.88), p(0.45, 0.80)],
                 color,
                 Stroke::NONE,
             ));
         }
         "find" => {
-            painter.circle_stroke(p(0.44, 0.44), side * 0.26, thin);
-            painter.line_segment([p(0.63, 0.63), p(0.86, 0.86)], thick);
+            circle_stroke(p(0.44, 0.44), side * 0.26, thin);
+            seg([p(0.63, 0.63), p(0.86, 0.86)], thick);
         }
         "name" => {
-            painter.add(Shape::closed_line(
+            push(Shape::closed_line(
                 vec![p(0.10, 0.30), p(0.62, 0.30), p(0.88, 0.50), p(0.62, 0.70), p(0.10, 0.70)],
                 thin,
             ));
-            painter.circle_filled(p(0.26, 0.50), side * 0.06, color);
+            circle_filled(p(0.26, 0.50), side * 0.06);
         }
 
         // ----- styles -----
@@ -189,18 +235,18 @@ pub fn draw(painter: &Painter, rect: Rect, name: &str, color: Color32) -> bool {
         // ----- view -----
         "freeze" => {
             rect_outline(0.12, 0.12, 0.88, 0.88);
-            painter.line_segment([p(0.12, 0.42), p(0.88, 0.42)], thick);
-            painter.line_segment([p(0.42, 0.12), p(0.42, 0.88)], thick);
+            seg([p(0.12, 0.42), p(0.88, 0.42)], thick);
+            seg([p(0.42, 0.12), p(0.42, 0.88)], thick);
         }
         "freeze-top" => {
             rect_outline(0.12, 0.12, 0.88, 0.88);
             rect_filled(0.14, 0.14, 0.86, 0.36);
-            painter.line_segment([p(0.12, 0.38), p(0.88, 0.38)], thick);
+            seg([p(0.12, 0.38), p(0.88, 0.38)], thick);
         }
         "freeze-first" => {
             rect_outline(0.12, 0.12, 0.88, 0.88);
             rect_filled(0.14, 0.14, 0.36, 0.86);
-            painter.line_segment([p(0.38, 0.12), p(0.38, 0.88)], thick);
+            seg([p(0.38, 0.12), p(0.38, 0.88)], thick);
         }
         "unfreeze" => {
             rect_outline(0.12, 0.12, 0.88, 0.88);
@@ -215,15 +261,15 @@ pub fn draw(painter: &Painter, rect: Rect, name: &str, color: Color32) -> bool {
             line((0.63, 0.12), (0.63, 0.88));
         }
         "zoom-in" | "zoom-out" => {
-            painter.circle_stroke(p(0.44, 0.44), side * 0.26, thin);
-            painter.line_segment([p(0.63, 0.63), p(0.86, 0.86)], thick);
+            circle_stroke(p(0.44, 0.44), side * 0.26, thin);
+            seg([p(0.63, 0.63), p(0.86, 0.86)], thick);
             line((0.30, 0.44), (0.58, 0.44));
             if name == "zoom-in" {
                 line((0.44, 0.30), (0.44, 0.58));
             }
         }
         "zoom-reset" => {
-            painter.circle_stroke(p(0.50, 0.52), side * 0.30, thin);
+            circle_stroke(p(0.50, 0.52), side * 0.30, thin);
             arrow_head(0.50, 0.20, 1.0, 0.0, 0.15);
         }
 
@@ -238,7 +284,7 @@ pub fn draw(painter: &Painter, rect: Rect, name: &str, color: Color32) -> bool {
             rect_outline(0.40, 0.30, 0.86, 0.90);
         }
         "rename" => {
-            painter.add(Shape::closed_line(
+            push(Shape::closed_line(
                 vec![p(0.18, 0.72), p(0.66, 0.14), p(0.84, 0.30), p(0.36, 0.88)],
                 thin,
             ));
@@ -249,7 +295,7 @@ pub fn draw(painter: &Painter, rect: Rect, name: &str, color: Color32) -> bool {
             line((0.40, 0.24), (0.40, 0.14));
             line((0.60, 0.24), (0.60, 0.14));
             line((0.40, 0.14), (0.60, 0.14));
-            painter.add(Shape::closed_line(
+            push(Shape::closed_line(
                 vec![p(0.24, 0.30), p(0.76, 0.30), p(0.68, 0.90), p(0.32, 0.90)],
                 thin,
             ));
@@ -265,7 +311,7 @@ pub fn draw(painter: &Painter, rect: Rect, name: &str, color: Color32) -> bool {
         "undo" | "redo" => {
             let mirror = name == "redo";
             let fx = |x: f32| if mirror { 1.0 - x } else { x };
-            painter.add(Shape::line(
+            push(Shape::line(
                 vec![
                     p(fx(0.20), 0.34),
                     p(fx(0.58), 0.34),
@@ -282,29 +328,73 @@ pub fn draw(painter: &Painter, rect: Rect, name: &str, color: Color32) -> bool {
             rect_outline(0.28, 0.56, 0.72, 0.86);
         }
         "open" => {
-            painter.add(Shape::closed_line(
+            push(Shape::closed_line(
                 vec![p(0.10, 0.78), p(0.10, 0.26), p(0.40, 0.26), p(0.50, 0.38), p(0.84, 0.38), p(0.84, 0.78)],
                 thin,
             ));
         }
         "fill-color" => {
             // Paint bucket: a tilted body with a drip.
-            painter.add(Shape::closed_line(
+            push(Shape::closed_line(
                 vec![p(0.16, 0.52), p(0.50, 0.18), p(0.84, 0.52), p(0.50, 0.86)],
                 thin,
             ));
             line((0.50, 0.10), (0.50, 0.24));
-            painter.circle_filled(p(0.86, 0.74), side * 0.08, color);
+            circle_filled(p(0.86, 0.74), side * 0.08);
         }
         "new-doc" => {
-            painter.add(Shape::closed_line(
+            push(Shape::closed_line(
                 vec![p(0.22, 0.10), p(0.62, 0.10), p(0.80, 0.30), p(0.80, 0.90), p(0.22, 0.90)],
                 thin,
             ));
             line((0.62, 0.10), (0.62, 0.30));
             line((0.62, 0.30), (0.80, 0.30));
         }
-        _ => return false,
+            _ => return None,
+        }
     }
-    true
+    Some(shapes.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &[&str] = &[
+        "cut", "copy", "paste", "save", "undo", "redo", "fill", "clear", "insert", "delete",
+        "resize", "sort", "sort-asc", "sort-desc", "filter", "find", "name", "cond-fmt", "chart",
+        "freeze", "freeze-top", "freeze-first", "unfreeze", "gridlines", "zoom-in", "zoom-out",
+        "zoom-reset", "sheet-new", "duplicate", "rename", "trash", "prev", "next", "align-left",
+        "align-center", "align-right", "wrap", "open", "new-doc", "fill-color",
+    ];
+
+    #[test]
+    fn every_icon_lands_optically_centered() {
+        let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::splat(20.0));
+        for name in SAMPLE {
+            let mut shapes =
+                build(rect, name, Color32::WHITE).unwrap_or_else(|| panic!("missing icon {name}"));
+            center_optically(&mut shapes, rect);
+            let mut bbox = Rect::NOTHING;
+            for s in &shapes {
+                bbox = bbox.union(s.visual_bounding_rect());
+            }
+            let c = bbox.center() - rect.center();
+            assert!(
+                c.x.abs() < 0.5 && c.y.abs() < 0.5,
+                "{name} ink is off-center by {c:?}"
+            );
+            assert!(
+                bbox.width().max(bbox.height()) >= rect.width() * 0.6,
+                "{name} came out too small: {:?}",
+                bbox.size()
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_names_build_nothing() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::splat(20.0));
+        assert!(build(rect, "no-such-icon", Color32::WHITE).is_none());
+    }
 }

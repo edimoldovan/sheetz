@@ -88,6 +88,10 @@ workbooks), and Sum/Average/Count of the selection in the status bar.
 
 **Charts** — bar, line and pie, drawn natively in floating windows.
 
+**Omarchy theming** — Sheetz wears the active Omarchy theme (accent and all),
+follows theme switches live without a restart, and handles light themes.
+Elsewhere it falls back to a neutral dark scheme.
+
 **Assistant (MCP)** — Sheetz is an MCP server, so Claude (or any MCP client)
 can create and maintain your spreadsheets while you watch. See below.
 

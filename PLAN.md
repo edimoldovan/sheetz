@@ -240,6 +240,12 @@ Same for xlsx fidelity bugs and for the missing merge-cells write API.
 
 ## App infrastructure track (continuous)
 
+- [x] **Omarchy theming** — reads the active theme's `colors.toml` (accent,
+      foreground, background; `alacritty.toml` as fallback) from
+      `~/.local/state/omarchy/current/theme/` and derives every surface from
+      it, light themes included. A watcher polls the theme identity and
+      restyles the running app in place — and keeps a slow repaint scheduled
+      so even an idle window follows a switch. Neutral dark without Omarchy.
 - [x] Unit tests for A1 parsing, column names, jump-to-edge, replace; xlsx
       round-trip integration test.
 - [ ] Per-frame cell format cache (the grid currently queries the engine per

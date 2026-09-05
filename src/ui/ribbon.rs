@@ -65,22 +65,93 @@ fn hex(c: [u8; 3]) -> String {
     format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2])
 }
 
-/// Paints a ribbon icon: a vector glyph when we have one, otherwise the name
-/// rendered as text (used for "B", "I", "U", "$", "%", "#", "Aa").
-fn paint_icon(painter: &egui::Painter, rect: Rect, icon: &str, color: Color32, size: f32, top: f32) {
-    let box_rect = Rect::from_min_size(
-        Pos2::new(rect.center().x - size / 2.0, rect.min.y + top),
-        Vec2::splat(size),
-    );
+// ----- shared ribbon-button geometry ---------------------------------------
+//
+// Every ribbon control — plain button, dropdown face, color picker — is drawn
+// from the same two bands, so icons line up across the whole strip and every
+// label starts at exactly the same height:
+//
+//   y  5..29   icon band: the icon centers in it, both axes
+//   y 32..     label line: CENTER_TOP anchored, one shared font
+//
+const BTN_H: f32 = 48.0;
+const ICON_TOP: f32 = 5.0;
+const ICON_H: f32 = 24.0;
+const LABEL_TOP: f32 = 32.0;
+const LABEL_FONT: f32 = 10.5;
+const BTN_ROUNDING: f32 = 5.0;
+
+/// The band an icon centers in. `reserve` carves space off the bottom (the
+/// color buttons put their stripe there).
+fn icon_band(rect: Rect, reserve: f32) -> Rect {
+    Rect::from_min_size(
+        Pos2::new(rect.min.x, rect.min.y + ICON_TOP),
+        Vec2::new(rect.width(), ICON_H - reserve),
+    )
+}
+
+/// Sizes a button from its caption: wide enough for the text, never smaller
+/// than a comfortable square.
+fn button_rect(ui: &mut Ui, caption: &str) -> (Rect, Response) {
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(
+            caption.to_owned(),
+            FontId::proportional(LABEL_FONT),
+            Color32::WHITE,
+        )
+        .size()
+        .x;
+    ui.allocate_exact_size(Vec2::new((text_w + 13.0).max(46.0), BTN_H), Sense::click())
+}
+
+/// Hover / pressed / active background, shared so every control reacts alike.
+fn paint_button_bg(ui: &Ui, rect: Rect, resp: &Response, active: bool) {
+    if active {
+        let accent = ui.visuals().selection.stroke.color;
+        ui.painter()
+            .rect_filled(rect, BTN_ROUNDING, accent.gamma_multiply(0.28));
+        ui.painter().rect_stroke(
+            rect,
+            CornerRadius::same(BTN_ROUNDING as u8),
+            Stroke::new(1.0, accent),
+            StrokeKind::Inside,
+        );
+    } else if resp.hovered() || resp.is_pointer_button_down_on() {
+        ui.painter()
+            .rect_filled(rect, BTN_ROUNDING, ui.style().interact(resp).weak_bg_fill);
+    }
+}
+
+/// Paints an icon centered in `band`: a vector glyph when we have one,
+/// otherwise the name as text ("B", "I", "U", "$", "Aa", …). Text is centered
+/// rather than top-anchored, so letters sit exactly where the drawings do —
+/// a font galley carries ascender padding that used to push them low.
+fn paint_icon(painter: &egui::Painter, band: Rect, icon: &str, color: Color32, size: f32) {
+    let box_rect = Rect::from_center_size(band.center(), Vec2::splat(size));
     if !crate::ui::icons::draw(painter, box_rect, icon, color) {
+        // Letters have no descender, so a galley-centered glyph rides high;
+        // nudge down to put the ink where the drawn icons put theirs.
         painter.text(
-            Pos2::new(rect.center().x, rect.min.y + top),
-            Align2::CENTER_TOP,
+            band.center() + Vec2::new(0.0, size * 0.06),
+            Align2::CENTER_CENTER,
             icon,
             FontId::proportional(size),
             color,
         );
     }
+}
+
+/// Every ribbon label is drawn from this one line, so all of them start at
+/// the same height regardless of what sits above.
+fn paint_label(painter: &egui::Painter, rect: Rect, text: &str, color: Color32) {
+    painter.text(
+        Pos2::new(rect.center().x, rect.min.y + LABEL_TOP),
+        Align2::CENTER_TOP,
+        text,
+        FontId::proportional(LABEL_FONT),
+        color,
+    );
 }
 
 /// One clickable color square in the palette popup.
@@ -101,23 +172,17 @@ fn swatch(ui: &mut Ui, color: [u8; 3]) -> Response {
 /// with a dropdown arrow below. Clicking anywhere opens the palette.
 fn color_button(ui: &mut Ui, icon: &str, label: &str, color: Option<[u8; 3]>) -> Response {
     let caption = format!("{label} ▾");
-    let label_font = FontId::proportional(10.5);
-    let text_w = ui
-        .painter()
-        .layout_no_wrap(caption.clone(), label_font.clone(), Color32::WHITE)
-        .size()
-        .x;
-    let size = Vec2::new((text_w + 14.0).max(46.0), 46.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let visuals = ui.style().interact(&resp);
-    if resp.hovered() || resp.is_pointer_button_down_on() {
-        ui.painter().rect_filled(rect, 4.0, visuals.weak_bg_fill);
-    }
-    let fg = visuals.text_color();
-    paint_icon(ui.painter(), rect, icon, fg, 17.0, 2.0);
+    let (rect, resp) = button_rect(ui, &caption);
+    paint_button_bg(ui, rect, &resp, false);
+    let fg = ui.style().interact(&resp).text_color();
+    // Icon in the upper part of the band, the current color as a stripe in the
+    // space reserved beneath it — together they fill the same band every other
+    // icon centers in.
+    let band = icon_band(rect, 7.0);
+    paint_icon(ui.painter(), band, icon, fg, 15.0);
     let stripe = Rect::from_min_max(
-        Pos2::new(rect.center().x - 9.0, rect.min.y + 23.0),
-        Pos2::new(rect.center().x + 9.0, rect.min.y + 28.0),
+        Pos2::new(rect.center().x - 10.0, band.max.y + 2.0),
+        Pos2::new(rect.center().x + 10.0, band.max.y + 7.0),
     );
     match color {
         Some(c) => {
@@ -132,13 +197,7 @@ fn color_button(ui: &mut Ui, icon: &str, label: &str, color: Option<[u8; 3]>) ->
             );
         }
     }
-    ui.painter().text(
-        Pos2::new(rect.center().x, rect.max.y - 3.0),
-        Align2::CENTER_BOTTOM,
-        caption,
-        label_font,
-        fg,
-    );
+    paint_label(ui.painter(), rect, &caption, fg);
     resp
 }
 
@@ -146,27 +205,11 @@ fn color_button(ui: &mut Ui, icon: &str, label: &str, color: Option<[u8; 3]>) ->
 /// a plain ribbon button so groups stay visually even.
 fn menu_face(ui: &mut Ui, icon: &str, label: &str) -> Response {
     let caption = format!("{label} ▾");
-    let label_font = FontId::proportional(10.5);
-    let text_w = ui
-        .painter()
-        .layout_no_wrap(caption.clone(), label_font.clone(), Color32::WHITE)
-        .size()
-        .x;
-    let size = Vec2::new((text_w + 14.0).max(46.0), 46.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let visuals = ui.style().interact(&resp);
-    if resp.hovered() || resp.is_pointer_button_down_on() {
-        ui.painter().rect_filled(rect, 4.0, visuals.weak_bg_fill);
-    }
-    let fg = visuals.text_color();
-    paint_icon(ui.painter(), rect, icon, fg, 19.0, 3.0);
-    ui.painter().text(
-        Pos2::new(rect.center().x, rect.max.y - 3.0),
-        Align2::CENTER_BOTTOM,
-        caption,
-        label_font,
-        fg,
-    );
+    let (rect, resp) = button_rect(ui, &caption);
+    paint_button_bg(ui, rect, &resp, false);
+    let fg = ui.style().interact(&resp).text_color();
+    paint_icon(ui.painter(), icon_band(rect, 0.0), icon, fg, 20.0);
+    paint_label(ui.painter(), rect, &caption, fg);
     resp
 }
 
@@ -205,31 +248,11 @@ impl SheetzApp {
         active: bool,
         out: &mut Vec<Command>,
     ) {
-        let icon_font = FontId::proportional(19.0);
-        let label_font = FontId::proportional(10.5);
-        let text_w = ui
-            .painter()
-            .layout_no_wrap(label.to_owned(), label_font.clone(), egui::Color32::WHITE)
-            .size()
-            .x;
-        let size = Vec2::new((text_w + 14.0).max(46.0), 46.0);
-        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-        let visuals = ui.style().interact(&resp);
-        if active {
-            ui.painter()
-                .rect_filled(rect, 4.0, ui.visuals().selection.bg_fill.linear_multiply(0.5));
-        } else if resp.hovered() || resp.is_pointer_button_down_on() {
-            ui.painter().rect_filled(rect, 4.0, visuals.weak_bg_fill);
-        }
-        let color = visuals.text_color();
-        paint_icon(ui.painter(), rect, icon, color, icon_font.size, 3.0);
-        ui.painter().text(
-            Pos2::new(rect.center().x, rect.max.y - 3.0),
-            Align2::CENTER_BOTTOM,
-            label,
-            label_font,
-            color,
-        );
+        let (rect, resp) = button_rect(ui, label);
+        paint_button_bg(ui, rect, &resp, active);
+        let color = ui.style().interact(&resp).text_color();
+        paint_icon(ui.painter(), icon_band(rect, 0.0), icon, color, 20.0);
+        paint_label(ui.painter(), rect, label, color);
         let resp = match self.keymap.shortcut_for(cmd) {
             Some(sc) => resp.on_hover_text(format!(
                 "{}  ({})",

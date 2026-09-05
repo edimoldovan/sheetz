@@ -48,6 +48,9 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             sheetz::fonts::install(&cc.egui_ctx);
+            // Wear the Omarchy theme from the first frame.
+            cc.egui_ctx
+                .set_visuals(sheetz::theme::visuals(&sheetz::theme::load()));
             let mut app = SheetzApp::new(path);
 
             // Start the assistant bridge unconditionally: launching from a

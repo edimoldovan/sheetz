@@ -320,6 +320,8 @@ pub struct SheetzApp {
     /// is taken once per session rather than on every edit.
     pub backed_up: bool,
     pub show_activity: bool,
+    /// Follows the Omarchy theme and restyles live when it changes.
+    pub theme_watcher: crate::theme::ThemeWatcher,
     /// Seconds of quiet remaining before the assistant's work is autosaved.
     pub autosave_in: Option<f32>,
 }

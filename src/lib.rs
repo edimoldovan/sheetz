@@ -10,4 +10,5 @@ pub mod fonts;
 pub mod mcp;
 pub mod keymap;
 pub mod state;
+pub mod theme;
 pub mod ui;

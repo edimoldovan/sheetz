@@ -113,7 +113,7 @@ impl SheetzApp {
         let visuals = ui.visuals();
         GridPaint {
             text: visuals.text_color(),
-            accent: visuals.selection.bg_fill,
+            accent: visuals.selection.stroke.color,
             line: Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
             show_lines: self.engine.show_grid_lines(self.sheet),
             bg: visuals.panel_fill,
@@ -227,17 +227,18 @@ impl SheetzApp {
             }
             let strength = (change.ttl / 6.0).clamp(0.0, 1.0);
             let rect = self.range_rect(change.range, origin);
+            let a = st.accent;
             painter.rect_filled(
                 rect,
                 0.0,
-                Color32::from_rgba_unmultiplied(120, 190, 255, (55.0 * strength) as u8),
+                Color32::from_rgba_unmultiplied(a.r(), a.g(), a.b(), (55.0 * strength) as u8),
             );
             painter.rect_stroke(
                 rect,
                 CornerRadius::ZERO,
                 Stroke::new(
                     1.5,
-                    Color32::from_rgba_unmultiplied(120, 190, 255, (200.0 * strength) as u8),
+                    Color32::from_rgba_unmultiplied(a.r(), a.g(), a.b(), (200.0 * strength) as u8),
                 ),
                 StrokeKind::Outside,
             );
