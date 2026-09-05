@@ -172,32 +172,51 @@ fn swatch(ui: &mut Ui, color: [u8; 3]) -> Response {
 /// with a dropdown arrow below. Clicking anywhere opens the palette.
 fn color_button(ui: &mut Ui, icon: &str, label: &str, color: Option<[u8; 3]>) -> Response {
     let caption = format!("{label} ▾");
-    let (rect, resp) = button_rect(ui, &caption);
+    // The current color sits as a small swatch *beside* the caption, so the
+    // icon above gets the full band and centers exactly like its neighbors.
+    const SWATCH_W: f32 = 11.0;
+    const SWATCH_GAP: f32 = 4.0;
+    let label_font = FontId::proportional(LABEL_FONT);
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(caption.clone(), label_font.clone(), Color32::WHITE)
+        .size()
+        .x;
+    let content_w = text_w + SWATCH_GAP + SWATCH_W;
+    let (rect, resp) = ui.allocate_exact_size(
+        Vec2::new((content_w + 13.0).max(46.0), BTN_H),
+        Sense::click(),
+    );
     paint_button_bg(ui, rect, &resp, false);
     let fg = ui.style().interact(&resp).text_color();
-    // Icon in the upper part of the band, the current color as a stripe in the
-    // space reserved beneath it — together they fill the same band every other
-    // icon centers in.
-    let band = icon_band(rect, 7.0);
-    paint_icon(ui.painter(), band, icon, fg, 15.0);
-    let stripe = Rect::from_min_max(
-        Pos2::new(rect.center().x - 10.0, band.max.y + 2.0),
-        Pos2::new(rect.center().x + 10.0, band.max.y + 7.0),
+    paint_icon(ui.painter(), icon_band(rect, 0.0), icon, fg, 20.0);
+
+    let start_x = rect.center().x - content_w / 2.0;
+    ui.painter().text(
+        Pos2::new(start_x, rect.min.y + LABEL_TOP),
+        Align2::LEFT_TOP,
+        caption,
+        label_font,
+        fg,
+    );
+    // As tall as the caption's glyphs, sitting on the same line.
+    let swatch = Rect::from_min_size(
+        Pos2::new(start_x + text_w + SWATCH_GAP, rect.min.y + LABEL_TOP + 1.0),
+        Vec2::new(SWATCH_W, 10.0),
     );
     match color {
         Some(c) => {
-            ui.painter().rect_filled(stripe, 1.0, rgb(c));
+            ui.painter().rect_filled(swatch, 1.0, rgb(c));
         }
         None => {
             ui.painter().rect_stroke(
-                stripe,
+                swatch,
                 CornerRadius::same(1),
                 Stroke::new(1.0, fg),
                 StrokeKind::Inside,
             );
         }
     }
-    paint_label(ui.painter(), rect, &caption, fg);
     resp
 }
 
@@ -703,7 +722,7 @@ impl SheetzApp {
             if let Some(choice) = choice {
                 self.apply_color(false, choice);
             }
-            let resp = color_button(ui, "▧", "Fill", fmt.fill_color).on_hover_text("Fill color");
+            let resp = color_button(ui, "fill-color", "Fill", fmt.fill_color).on_hover_text("Fill color");
             let choice = self.palette_popup(&resp, "No fill");
             if let Some(choice) = choice {
                 self.apply_color(true, choice);
