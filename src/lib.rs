@@ -7,6 +7,7 @@ pub mod app;
 pub mod commands;
 pub mod engine;
 pub mod fonts;
+pub mod mcp;
 pub mod keymap;
 pub mod state;
 pub mod ui;

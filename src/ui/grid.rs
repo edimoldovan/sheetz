@@ -219,6 +219,30 @@ impl SheetzApp {
             );
         }
 
+        // Ranges the assistant just wrote, tinted and fading out so the user
+        // can see what changed without hunting for it.
+        for change in &self.recent_changes {
+            if change.sheet != self.sheet {
+                continue;
+            }
+            let strength = (change.ttl / 6.0).clamp(0.0, 1.0);
+            let rect = self.range_rect(change.range, origin);
+            painter.rect_filled(
+                rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(120, 190, 255, (55.0 * strength) as u8),
+            );
+            painter.rect_stroke(
+                rect,
+                CornerRadius::ZERO,
+                Stroke::new(
+                    1.5,
+                    Color32::from_rgba_unmultiplied(120, 190, 255, (200.0 * strength) as u8),
+                ),
+                StrokeKind::Outside,
+            );
+        }
+
         if let Some((sheet, range)) = self.cut_marker {
             if sheet == self.sheet {
                 painter.rect_stroke(

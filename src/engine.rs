@@ -217,6 +217,8 @@ pub struct Engine {
     pub path: Option<PathBuf>,
     pub dirty: bool,
     clipboard: Option<InternalClip>,
+    /// Undo entries produced since `begin_transaction`.
+    undo_steps: usize,
 }
 
 /// A formula-aware copy taken from this app (survives across sheets).
@@ -246,6 +248,7 @@ impl Engine {
             path: None,
             dirty: false,
             clipboard: None,
+            undo_steps: 0,
         })
     }
 
@@ -259,6 +262,7 @@ impl Engine {
             path: Some(path.to_path_buf()),
             dirty: false,
             clipboard: None,
+            undo_steps: 0,
         })
     }
 
@@ -397,7 +401,7 @@ impl Engine {
         self.um
             .delete_conditional_formatting(sheet, index)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -440,7 +444,7 @@ impl Engine {
         self.um
             .add_conditional_formatting(sheet, &range_str, rule)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -459,7 +463,7 @@ impl Engine {
         self.um
             .add_conditional_formatting(sheet, &range_str, rule)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -469,7 +473,7 @@ impl Engine {
         self.um
             .set_user_input(sheet, row, col, value)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -477,7 +481,7 @@ impl Engine {
         self.um
             .range_clear_contents(&range.area(sheet))
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -485,7 +489,7 @@ impl Engine {
         self.um
             .range_clear_formatting(&range.area(sheet))
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -493,7 +497,7 @@ impl Engine {
         self.um
             .range_clear_all(&range.area(sheet))
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -511,7 +515,7 @@ impl Engine {
         self.um
             .update_range_style(&range.area(sheet), path, &value)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -552,7 +556,7 @@ impl Engine {
         self.um
             .set_area_with_border(&range.area(sheet), &border)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -560,13 +564,13 @@ impl Engine {
 
     pub fn undo(&mut self) {
         if self.um.undo().is_ok() {
-            self.dirty = true;
+            self.step();
         }
     }
 
     pub fn redo(&mut self) {
         if self.um.redo().is_ok() {
-            self.dirty = true;
+            self.step();
         }
     }
 
@@ -646,7 +650,7 @@ impl Engine {
         if is_cut {
             self.clipboard = None;
         }
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -668,7 +672,7 @@ impl Engine {
         self.um
             .paste_csv_string(&area, text)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -678,7 +682,7 @@ impl Engine {
         self.um
             .insert_rows(sheet, row, count)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -686,7 +690,7 @@ impl Engine {
         self.um
             .delete_rows(sheet, row, count)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -694,7 +698,7 @@ impl Engine {
         self.um
             .insert_columns(sheet, col, count)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -702,7 +706,7 @@ impl Engine {
         self.um
             .delete_columns(sheet, col, count)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -710,7 +714,7 @@ impl Engine {
         self.um
             .set_columns_width(sheet, c0, c1, width.max(0.0))
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -718,7 +722,7 @@ impl Engine {
         self.um
             .set_rows_height(sheet, r0, r1, height.max(0.0))
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -726,7 +730,7 @@ impl Engine {
         self.um
             .set_rows_hidden(sheet, r0, r1, hidden)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -782,7 +786,7 @@ impl Engine {
         self.um
             .set_frozen_columns_count(sheet, cols.max(0))
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -799,6 +803,64 @@ impl Engine {
 
     // ----- sheets -----
 
+    /// Index of a sheet by name, case-insensitive.
+    pub fn sheet_index(&self, name: &str) -> Option<u32> {
+        self.sheet_names()
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(name))
+            .map(|i| i as u32)
+    }
+
+    /// Displayed values for a whole block, row-major. One call instead of
+    /// one per cell, which matters when a tool reads a window of the sheet.
+    pub fn read_range(&self, sheet: u32, range: Range) -> Vec<Vec<String>> {
+        (range.r0..=range.r1)
+            .map(|r| {
+                (range.c0..=range.c1)
+                    .map(|c| self.display(sheet, r, c))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Raw cell contents (formulas as typed) for a whole block, row-major.
+    pub fn read_range_content(&self, sheet: u32, range: Range) -> Vec<Vec<String>> {
+        (range.r0..=range.r1)
+            .map(|r| {
+                (range.c0..=range.c1)
+                    .map(|c| self.content(sheet, r, c))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Batches a run of edits: evaluation is paused until `end_transaction`,
+    /// so a tool writing 50 cells recalculates once rather than 50 times.
+    ///
+    /// This does *not* collapse the undo history — IronCalc keeps `history`
+    /// private with no public grouping API — so the app counts the steps a
+    /// batch produced and undoes that many at once (see `undo_groups` in
+    /// `SheetzApp`).
+    pub fn begin_transaction(&mut self) {
+        self.um.pause_evaluation();
+        self.undo_steps = 0;
+    }
+
+    /// Ends the batch, recalculates, and returns how many undo entries the
+    /// batch produced.
+    pub fn end_transaction(&mut self) -> usize {
+        self.um.resume_evaluation();
+        self.um.evaluate();
+        std::mem::take(&mut self.undo_steps)
+    }
+
+    /// Counts one undo entry. Called by every mutating wrapper so the app can
+    /// group a tool call's edits into a single Ctrl+Z.
+    fn step(&mut self) {
+        self.undo_steps = self.undo_steps.saturating_add(1);
+        self.dirty = true;
+    }
+
     pub fn sheet_names(&self) -> Vec<String> {
         self.um.get_model().workbook.get_worksheet_names()
     }
@@ -811,31 +873,31 @@ impl Engine {
 
     pub fn new_sheet(&mut self) -> Result<()> {
         self.um.new_sheet().map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
     pub fn delete_sheet(&mut self, sheet: u32) -> Result<()> {
         self.um.delete_sheet(sheet).map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
     pub fn rename_sheet(&mut self, sheet: u32, name: &str) -> Result<()> {
         self.um.rename_sheet(sheet, name).map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
     pub fn duplicate_sheet(&mut self, sheet: u32) -> Result<()> {
         self.um.duplicate_sheet(sheet).map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
     pub fn move_sheet(&mut self, sheet: u32, to: u32) -> Result<()> {
         self.um.move_sheet(sheet, to).map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -846,7 +908,7 @@ impl Engine {
             Color::from_param(color).map_err(|e| anyhow!(e))?
         };
         self.um.set_sheet_color(sheet, &c).map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -858,7 +920,7 @@ impl Engine {
         self.um
             .set_show_grid_lines(sheet, show)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -883,7 +945,7 @@ impl Engine {
         self.um
             .auto_fill_rows(&src.area(sheet), to_row)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -891,7 +953,7 @@ impl Engine {
         self.um
             .auto_fill_columns(&src.area(sheet), to_col)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -961,7 +1023,7 @@ impl Engine {
         self.um
             .new_defined_name(name, None, reference)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -969,7 +1031,7 @@ impl Engine {
         self.um
             .delete_defined_name(name, None)
             .map_err(|e| anyhow!(e))?;
-        self.dirty = true;
+        self.step();
         Ok(())
     }
 
@@ -1225,7 +1287,7 @@ pub fn col_letters(mut col: i32) -> String {
 }
 
 /// Parses "A1:B2" (or "A1") into a Range.
-fn parse_a1_range(s: &str) -> Option<Range> {
+pub fn parse_a1_range(s: &str) -> Option<Range> {
     let (a, b) = match s.split_once(':') {
         Some((a, b)) => (a, b),
         None => (s, s),

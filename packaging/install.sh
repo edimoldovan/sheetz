@@ -21,3 +21,8 @@ fi
 
 echo "Installed to $prefix/bin/sheetz"
 echo "Keymap installed at ~/.config/sheetz/keymap.toml — edit to taste."
+
+# Make assistants aware of Sheetz. The MCP server itself always starts with the
+# app; this only tells the clients how to reach it, so nobody has to hand-edit
+# a JSON config. Existing settings are merged, not replaced.
+"$prefix/bin/sheetz" register || true

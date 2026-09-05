@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "sheetz": {
+      "command": "sh",
+      "args": ["-c", "exec ./target/release/sheetz mcp"]
+    }
+  }
+}

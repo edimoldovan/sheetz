@@ -92,6 +92,15 @@ impl SheetzApp {
             backstage: false,
             recent: load_recent(),
             recent_colors: DEFAULT_FILL_COLORS.to_vec(),
+            mcp_rx: None,
+            mcp_serving: false,
+            undo_groups: Vec::new(),
+            recent_changes: Vec::new(),
+            activity: Vec::new(),
+            assistant_request: None,
+            backed_up: false,
+            show_activity: false,
+            autosave_in: None,
         };
         if let Some(p) = &path {
             if app.engine.path.is_some() {
@@ -947,10 +956,144 @@ impl SheetzApp {
         self.report("Edit", result);
         self.invalidate_geometry();
     }
+
+
+    /// Runs any assistant tool calls waiting on the bridge.
+    ///
+    /// This happens on the UI thread, between frames, so a tool sees a
+    /// consistent workbook and the user sees the result immediately.
+    fn drain_assistant_calls(&mut self) {
+        // Refuse while a cell editor is open rather than yanking it away.
+        let busy = self.edit.is_some();
+        let mut calls = Vec::new();
+        if let Some(rx) = &self.mcp_rx {
+            while let Ok(call) = rx.try_recv() {
+                calls.push(call);
+            }
+        }
+        for call in calls {
+            if busy {
+                let _ = call.reply.send(Err(
+                    "the user is editing a cell right now — try again in a moment".to_string(),
+                ));
+                continue;
+            }
+            // Back the file up once per session before the first write.
+            if !self.backed_up && mutates(&call.tool) {
+                self.backup_once();
+            }
+            let result = crate::mcp::tools::dispatch(self, &call.tool, &call.args)
+                .map_err(|e| format!("{e:#}"));
+            // The person this is built for will not think to press Ctrl+S, so
+            // an assistant edit schedules its own save once things go quiet.
+            if result.is_ok() && mutates(&call.tool) && self.engine.path.is_some() {
+                self.autosave_in = Some(3.0);
+            }
+            match &result {
+                Ok(_) => self.log_activity(describe(&call.tool, &call.args), true),
+                Err(e) => self.log_activity(format!("{}: {e}", call.tool), false),
+            }
+            let _ = call.reply.send(result);
+        }
+    }
+
+    /// Copies the workbook to `<name>.bak.xlsx` before the assistant's first
+    /// write of the session. Cheap insurance for a file kept for months.
+    fn backup_once(&mut self) {
+        self.backed_up = true;
+        let Some(path) = self.engine.path.clone() else {
+            return;
+        };
+        let backup = path.with_extension("bak.xlsx");
+        if let Err(e) = std::fs::copy(&path, &backup) {
+            self.set_status(format!("Backup failed: {e}"));
+        }
+    }
+
+    /// Saves a few seconds after the assistant stops editing, so a burst of
+    /// tool calls produces one save rather than one per call.
+    fn tick_autosave(&mut self, ctx: &Context) {
+        let Some(remaining) = self.autosave_in else {
+            return;
+        };
+        let dt = ctx.input(|i| i.stable_dt).min(0.5);
+        let remaining = remaining - dt;
+        if remaining > 0.0 {
+            self.autosave_in = Some(remaining);
+            ctx.request_repaint();
+            return;
+        }
+        self.autosave_in = None;
+        if let Some(path) = self.engine.path.clone() {
+            match self.engine.save(&path) {
+                Ok(()) => self.set_status(format!("Saved {}", path.display())),
+                Err(e) => self.set_status(format!("Autosave failed: {e}")),
+            }
+        }
+    }
+
+    /// Fades assistant change highlights, and keeps repainting while any are
+    /// still visible.
+    fn tick_change_highlights(&mut self, ctx: &Context) {
+        if self.recent_changes.is_empty() {
+            return;
+        }
+        let dt = ctx.input(|i| i.stable_dt).min(0.1);
+        for change in &mut self.recent_changes {
+            change.ttl -= dt;
+        }
+        self.recent_changes.retain(|c| c.ttl > 0.0);
+        ctx.request_repaint();
+    }
+
+    /// Modal for a destructive action the assistant asked to perform.
+    fn assistant_confirm(&mut self, ctx: &Context) {
+        let Some(request) = self.assistant_request.clone() else {
+            return;
+        };
+        let mut choice = None;
+        eframe::egui::Window::new("Assistant request")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(eframe::egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(&request.prompt);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Allow").clicked() {
+                        choice = Some(true);
+                    }
+                    if ui.button("Refuse").clicked() {
+                        choice = Some(false);
+                    }
+                });
+            });
+        match choice {
+            Some(true) => {
+                self.assistant_request = None;
+                match request.action {
+                    crate::state::AssistantAction::DeleteRows { sheet, at, count } => {
+                        let result = self.engine.delete_rows(sheet, at, count);
+                        self.report("Delete rows", result);
+                        self.invalidate_geometry();
+                    }
+                }
+            }
+            Some(false) => {
+                self.assistant_request = None;
+                self.set_status("Assistant request refused");
+            }
+            None => {}
+        }
+    }
 }
 
 impl eframe::App for SheetzApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.drain_assistant_calls();
+        self.tick_autosave(ctx);
+        self.tick_change_highlights(ctx);
+
         // Intercept window close while there are unsaved changes.
         if ctx.input(|i| i.viewport().close_requested()) && self.engine.dirty && !self.allow_close {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
@@ -981,6 +1124,7 @@ impl eframe::App for SheetzApp {
         }
 
         self.confirm_dialog(ctx);
+        self.assistant_confirm(ctx);
         self.update_title(ctx);
     }
 }
@@ -1003,6 +1147,40 @@ impl SheetzApp {
             ctx.send_viewport_cmd(ViewportCommand::Title(title.clone()));
             self.last_title = title;
         }
+    }
+}
+
+/// Tools that change the workbook (so a backup is worth taking first).
+fn mutates(tool: &str) -> bool {
+    !matches!(
+        tool,
+        "workbook_info" | "range_read" | "table_schema" | "table_find" | "find" | "stats"
+    )
+}
+
+/// A one-line, plain-English account of a tool call for the activity log.
+fn describe(tool: &str, args: &serde_json::Value) -> String {
+    let get = |k: &str| {
+        args.get(k)
+            .and_then(|v| v.as_str().map(str::to_string).or_else(|| Some(v.to_string())))
+            .unwrap_or_default()
+    };
+    match tool {
+        "cell_set" => format!("set {} to {}", get("cell"), get("value")),
+        "range_set" => format!("wrote a block at {}", get("range")),
+        "range_format" => format!("formatted {}", get("range")),
+        "table_append" => format!("added a row: {}", get("record")),
+        "table_update" => format!("updated rows matching {}", get("criteria")),
+        "rows_insert" => format!("inserted rows at {}", get("at")),
+        "rows_delete" => format!("asked to delete rows at {}", get("at")),
+        "sheet_add" => "added a sheet".to_string(),
+        "sheet_rename" => format!("renamed a sheet to {}", get("name")),
+        "sort" => format!("sorted {} by {}", get("range"), get("by")),
+        "workbook_open" => format!("opened {}", get("path")),
+        "workbook_save" => "saved the workbook".to_string(),
+        "template_create" => format!("created a {} workbook", get("kind")),
+        "undo" => "undid the last action".to_string(),
+        other => other.to_string(),
     }
 }
 

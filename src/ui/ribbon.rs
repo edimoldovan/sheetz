@@ -404,6 +404,83 @@ impl SheetzApp {
         });
     }
 
+    /// Backstage "Assistant" section: whether the MCP bridge is live, and the
+    /// one-click way to make Claude (or another client) aware of Sheetz.
+    ///
+    /// This exists so that connecting an assistant never requires a terminal.
+    fn assistant_panel(&mut self, ui: &mut Ui) {
+        let listening = crate::mcp::proto::is_listening();
+        let (dot, text) = match (self.mcp_serving, listening) {
+            (true, _) => (
+                Color32::from_rgb(60, 190, 100),
+                "Ready — this window is the one an assistant edits".to_string(),
+            ),
+            (false, true) => (
+                Color32::from_rgb(230, 180, 60),
+                "Another Sheetz window is handling assistant requests".to_string(),
+            ),
+            (false, false) => (
+                Color32::from_rgb(220, 90, 90),
+                "Not available — could not open the connection".to_string(),
+            ),
+        };
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+            ui.painter().circle_filled(rect.center(), 5.0, dot);
+            ui.label(text);
+        });
+        ui.add_space(6.0);
+
+        for client in crate::mcp::register::known_clients() {
+            ui.horizontal(|ui| {
+                let status = if !client.path.exists() {
+                    "not installed".to_string()
+                } else if client.registered {
+                    "connected".to_string()
+                } else {
+                    "not connected".to_string()
+                };
+                ui.label(format!("{} — {status}", client.name));
+                if client.path.exists() && !client.registered && ui.button("Connect").clicked() {
+                    match crate::mcp::register::register_one(&client.path) {
+                        Ok(()) => self.set_status(format!(
+                            "Connected to {}. Restart it to pick up Sheetz.",
+                            client.name
+                        )),
+                        Err(e) => self.set_status(format!("Could not connect: {e}")),
+                    }
+                }
+            });
+        }
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(
+                "Connecting writes a \"sheetz\" entry into the client's config \
+                 (the previous file is kept as .bak). Restart the client afterwards.",
+            )
+            .weak()
+            .small(),
+        );
+
+        if !self.activity.is_empty() {
+            ui.add_space(14.0);
+            ui.heading("What the assistant did");
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical()
+                .max_height(220.0)
+                .show(ui, |ui| {
+                    for entry in &self.activity {
+                        let colour = if entry.ok {
+                            ui.visuals().text_color()
+                        } else {
+                            Color32::from_rgb(220, 120, 120)
+                        };
+                        ui.label(egui::RichText::new(&entry.text).color(colour).small());
+                    }
+                });
+        }
+    }
+
     pub fn ribbon(&mut self, ctx: &Context) -> Vec<Command> {
         let mut cmds = Vec::new();
         egui::TopBottomPanel::top("ribbon").show(ctx, |ui| {
@@ -872,6 +949,11 @@ impl SheetzApp {
                     open_recent = Some(path.clone());
                 }
             }
+
+            ui.add_space(18.0);
+            ui.heading("Assistant");
+            ui.add_space(4.0);
+            self.assistant_panel(ui);
         });
 
         if let Some(path) = open_recent {

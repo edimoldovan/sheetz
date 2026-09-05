@@ -98,24 +98,57 @@ in the GUI**, and every change is visible immediately.
 
 ### Transport — the live bridge
 
+**Requirement: launching Sheetz normally — from the desktop launcher, a file
+manager, anywhere — is the only step.** No terminal, no flag, no separate
+daemon to remember. A CLI entry point may exist, but nothing may *depend* on
+the user typing it.
+
 MCP clients launch a server and speak newline-delimited JSON-RPC 2.0 over
 stdio, so the running GUI can't be the server directly (its stdio isn't the
-client's). Three pieces:
+client's). Hence a socket the GUI always holds, plus a shim that bridges to it.
 
-- [ ] **Socket server inside the app** — a background thread accepting on
-      `$XDG_RUNTIME_DIR/sheetz.sock`, parsing JSON-RPC.
-- [ ] **Commands marshalled onto the UI thread** — the socket thread sends a
+- [x] **Socket server starts with the app, unconditionally** — spawned during
+      startup, not behind a flag or subcommand, so a launcher start is fully
+      equivalent to a terminal start.
+- [x] **Socket path and liveness** — `$XDG_RUNTIME_DIR/sheetz.sock`, falling
+      back to `/tmp/sheetz-$UID.sock` (a launcher's environment is thinner than
+      a shell's, so nothing may assume shell-only variables). On startup, try
+      connecting to an existing socket first: if it answers, another instance
+      is primary and this one serves nothing; if it refuses, the file is stale
+      — unlink and bind. Remove it on clean exit.
+- [x] **Commands marshalled onto the UI thread** — the socket thread sends a
       request plus a reply channel; `update()` drains the queue, applies it to
       the `Engine` and replies. `Context::request_repaint()` (Send + Sync) wakes
       the loop, so edits land even while the app sits idle.
-- [ ] **`sheetz mcp` stdio shim** — the tiny binary the MCP client actually
-      launches. Connects to the socket and proxies both directions; starts the
-      GUI itself if it isn't running, so the user never has to.
-- [ ] Protocol layer: `initialize`, `ping`, `tools/list`, `tools/call`, tool
+- [x] **`sheetz mcp` stdio shim** — the tiny binary the MCP client launches.
+      Proxies stdio to the socket; if nothing is listening it starts the GUI
+      itself and waits for the socket, so an assistant-first flow works too.
+- [x] Protocol layer: `initialize`, `ping`, `tools/list`, `tools/call`, tool
       failures as `isError` results rather than protocol errors. Hand-rolled,
-      no framework, ~100 lines (the shape is proven in viode's `viode-mcp`).
-- [ ] `.mcp.json` plus an end-to-end test that spawns the shim and speaks
-      JSON-RPC exactly as a client would.
+      no framework (the shape is proven in viode's `viode-mcp`).
+- [x] Tests covering the protocol surface: schemas, initialize, tools/list,
+      notifications, malformed input, and tool failures arriving as `isError`
+      results. The socket and GUI halves are exercised by driving the real
+      binary with an MCP client script.
+
+### Registration — the other half of "no terminal commands"
+
+A running socket is useless if the assistant doesn't know Sheetz exists.
+Registering an MCP server normally means hand-editing a client's JSON config,
+which is precisely the step being ruled out — so Sheetz does it:
+
+- [x] **Installer registers the server** — `packaging/install.sh` adds the
+      `sheetz` entry (pointing at `sheetz mcp`) to the MCP client configs it
+      finds, merging into existing JSON rather than overwriting it, and
+      leaving a backup.
+- [x] **In-app "Connect to assistant"** — a File/backstage action that does the
+      same registration on demand and reports what it wrote, for people who
+      installed some other way or added a client later. This is the path a
+      non-technical user actually takes.
+- [x] **Status readout** — the backstage shows whether the socket is listening,
+      whether this instance is the primary, and which clients are registered,
+      so "why can't Claude see my sheet?" is answerable without a terminal.
+- [x] `.mcp.json` in the repo for development use.
 
 ### Tools the assistant needs
 
@@ -123,53 +156,55 @@ Raw cell addressing is not enough — asking a model to compute "row 14, column
 D" is where it will make mistakes. Sheets that hold records get record-shaped
 tools on top of the cell-level ones.
 
-- [ ] **Discovery** — `workbook_info` (sheets, used ranges, dirty state, path),
+- [x] **Discovery** — `workbook_info` (sheets, used ranges, dirty state, path),
       `sheet_read` returning a *window* with values and optionally formulas.
       Hard cap the cell count and default to the used range; a naive
       "read the sheet" on a million rows must be impossible.
-- [ ] **Cell level** — `cell_set`, `range_set`, `range_format`,
+- [x] **Cell level** — `cell_set`, `range_set`, `range_format`,
       `rows_insert/delete`, `cols_insert/delete`, `sheet_add/rename/delete` —
       one-liners over `engine.rs`.
-- [ ] **Record level** — treat a header row as a schema: `table_schema`,
+- [x] **Record level** — treat a header row as a schema: `table_schema`,
       `table_append(record)`, `table_find(criteria)`, `table_update(match,
       changes)`. This is what makes "mark the Acme application as rejected"
       reliable instead of a guess about coordinates.
-- [ ] **Templates** — `workbook_from_template("job-applications" | "budget" |
+- [x] **Templates** — `workbook_from_template("job-applications" | "budget" |
       …)`: headers, formats, freeze, filter, a couple of summary formulas. Gets
       a useful file existing in one turn.
-- [ ] **Query** — `stats`, `find`, `sort_range`, `filter` so the model can
+- [x] **Query** — `stats`, `find`, `sort_range`, `filter` so the model can
       answer questions without dragging the whole sheet into its context.
 
 ### Trust, safety and visibility
 
 The point of doing this in a visible GUI is that the human stays in the loop.
 
-- [ ] **Change highlighting** — cells the assistant just wrote get a temporary
+- [x] **Change highlighting** — cells the assistant just wrote get a temporary
       tint that fades, so you can see what it touched at a glance.
-- [ ] **Activity log** — a side panel listing each tool call in plain English
+- [x] **Activity log** — a side panel listing each tool call in plain English
       ("added row 12: Acme, Applied, 2026-08-30"), with the range it touched.
-- [ ] **One tool call = one undo step** — group a call's edits into a single
-      history entry so Ctrl+Z undoes a whole assistant action, not a third of
-      one. Needs a transaction boundary in the engine layer.
-- [ ] **Destructive operations gated** — deleting sheets, clearing ranges or
+- [x] **One tool call = one undo step** — done at the app layer: the engine
+      counts the undo entries a batch produced and `undo_grouped` pops them
+      together. IronCalc keeps its history private with no grouping API, so
+      collapsing them *inside* the engine stays blocked upstream.
+- [x] **Destructive operations gated** — deleting sheets, clearing ranges or
       overwriting non-empty blocks prompt for confirmation in the UI (or are
       refused in an unattended mode). The model must not be able to quietly
       destroy a year of records.
-- [ ] **Edit conflicts** — refuse (with a clear error the model can act on)
+- [x] **Edit conflicts** — refuse (with a clear error the model can act on)
       while the user has a cell editor open, rather than yanking it away.
-- [ ] **Save policy** — debounced autosave after assistant edits, since the
+- [x] **Save policy** — debounced autosave after assistant edits, since the
       target user will not think to press Ctrl+S; explicit `workbook_save` too,
       and never silently discard the human's unsaved work.
-- [ ] **Backups** — keep the previous version alongside the file before the
+- [x] **Backups** — keep the previous version alongside the file before the
       first assistant write of a session. Cheap insurance for a file someone
       maintains for months.
 
 ### Engine gaps this needs first
 
-- [ ] Make `parse_a1_range` public — tools should take `"B2:D9"`, not integers.
-- [ ] `read_range` returning a value grid in one call.
-- [ ] Sheet lookup by name, since tools take names and the engine takes indices.
-- [ ] Transaction begin/end around a batch of edits for the undo grouping.
+- [x] Make `parse_a1_range` public — tools should take `"B2:D9"`, not integers.
+- [x] `read_range` returning a value grid in one call.
+- [x] Sheet lookup by name, since tools take names and the engine takes indices.
+- [x] Transaction begin/end around a batch of edits — batches the recalc (one
+      evaluation per tool call) and counts undo steps for the grouping above.
 
 ## v0.7+ — The long tail
 

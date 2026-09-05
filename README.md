@@ -88,7 +88,37 @@ workbooks), and Sum/Average/Count of the selection in the status bar.
 
 **Charts** — bar, line and pie, drawn natively in floating windows.
 
-See [PLAN.md](PLAN.md) for the parity roadmap and what is still missing.
+**Assistant (MCP)** — Sheetz is an MCP server, so Claude (or any MCP client)
+can create and maintain your spreadsheets while you watch. See below.
+
+See [PLAN.md](PLAN.md) for the roadmap and what is still missing.
+
+## Working with an assistant
+
+The server starts with the app — launching Sheetz any normal way, desktop
+launcher included, is all that is needed. There is no flag and no daemon.
+
+To let an assistant find it, open **File → Assistant** and press **Connect**
+(the installer does this too). That writes a `sheetz` entry into the client's
+config, keeping a `.bak` of the previous file; restart the client afterwards.
+
+Then just talk to it:
+
+> *"Make me a job application tracker."*
+> *"I applied to Acme today for the data analyst role, found it on LinkedIn."*
+> *"Mark the Globex application as an offer, I need to decide by Friday."*
+> *"How many are still waiting on a reply?"*
+
+Edits land in the window you are looking at and are tinted for a few seconds so
+you can see what changed. The assistant works in terms of *records* — it
+matches "the Acme row" against your header row rather than guessing at
+coordinates. Safety rails: one tool call is one Ctrl+Z, deleting rows asks you
+first, edits are refused while you are typing in a cell, the file is backed up
+before the assistant's first write of a session, and work is autosaved a few
+seconds after it goes quiet.
+
+`sheetz mcp` is the stdio shim clients launch, and `sheetz register` wires up
+config from a terminal — both are conveniences, never requirements.
 
 ## Known limitations
 

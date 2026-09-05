@@ -222,6 +222,35 @@ impl Default for NameState {
     }
 }
 
+/// A destructive thing the assistant asked for, held until the user approves.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AssistantAction {
+    DeleteRows { sheet: u32, at: i32, count: i32 },
+}
+
+/// A pending confirmation raised by an assistant tool call.
+#[derive(Clone, Debug)]
+pub struct AssistantRequest {
+    pub prompt: String,
+    pub action: AssistantAction,
+}
+
+/// A range the assistant recently wrote, tinted in the grid until it fades.
+#[derive(Clone, Copy, Debug)]
+pub struct RecentChange {
+    pub sheet: u32,
+    pub range: Range,
+    /// Seconds of fade remaining.
+    pub ttl: f32,
+}
+
+/// One line in the assistant activity log.
+#[derive(Clone, Debug)]
+pub struct Activity {
+    pub text: String,
+    pub ok: bool,
+}
+
 pub struct SheetzApp {
     pub engine: Engine,
     pub keymap: Keymap,
@@ -273,9 +302,91 @@ pub struct SheetzApp {
     pub backstage: bool,
     pub recent: Vec<PathBuf>,
     pub recent_colors: Vec<[u8; 3]>,
+
+    // Assistant (MCP) session state.
+    /// Queue of tool calls waiting to run on this thread.
+    pub mcp_rx: Option<std::sync::mpsc::Receiver<crate::mcp::bridge::Call>>,
+    /// True when this instance owns the MCP socket.
+    pub mcp_serving: bool,
+    /// How many engine undo entries each logical action produced, newest last.
+    pub undo_groups: Vec<usize>,
+    /// Ranges the assistant just wrote, tinted until they fade.
+    pub recent_changes: Vec<RecentChange>,
+    /// What the assistant has done this session, newest first.
+    pub activity: Vec<Activity>,
+    /// Shown as a modal when a tool wants to do something destructive.
+    pub assistant_request: Option<AssistantRequest>,
+    /// Set once the assistant has written to the current file, so the backup
+    /// is taken once per session rather than on every edit.
+    pub backed_up: bool,
+    pub show_activity: bool,
+    /// Seconds of quiet remaining before the assistant's work is autosaved.
+    pub autosave_in: Option<f32>,
 }
 
 impl SheetzApp {
+    /// Records that the assistant touched a range, for the fading highlight.
+    pub fn note_change(&mut self, sheet: u32, range: Range) {
+        self.recent_changes.push(RecentChange {
+            sheet,
+            range,
+            ttl: 6.0,
+        });
+        if self.recent_changes.len() > 64 {
+            self.recent_changes.remove(0);
+        }
+    }
+
+    /// Remembers that one logical action produced `steps` undo entries, so a
+    /// single Ctrl+Z can undo the whole thing.
+    pub fn push_undo_group(&mut self, steps: usize) {
+        if steps > 1 {
+            self.undo_groups.push(steps);
+        }
+    }
+
+    /// Undo one logical action: a whole assistant edit if the last thing done
+    /// was one, otherwise a single step.
+    pub fn undo_grouped(&mut self) {
+        let steps = self.undo_groups.pop().unwrap_or(1);
+        for _ in 0..steps {
+            self.engine.undo();
+        }
+        self.invalidate_geometry();
+    }
+
+    /// Queues a destructive request for the user to approve.
+    pub fn request_confirmation(&mut self, prompt: String, action: AssistantAction) {
+        self.assistant_request = Some(AssistantRequest { prompt, action });
+    }
+
+    pub fn log_activity(&mut self, text: impl Into<String>, ok: bool) {
+        self.activity.insert(
+            0,
+            Activity {
+                text: text.into(),
+                ok,
+            },
+        );
+        self.activity.truncate(200);
+    }
+
+    /// Replaces the workbook with an empty one (used by templates).
+    pub fn new_workbook(&mut self) {
+        if let Ok(engine) = Engine::new() {
+            self.engine = engine;
+            self.sheet = 0;
+            self.cursor = (1, 1);
+            self.anchor = (1, 1);
+            self.saved_cursors.clear();
+            self.edit = None;
+            self.undo_groups.clear();
+            self.recent_changes.clear();
+            self.backed_up = false;
+            self.reset_view();
+        }
+    }
+
     /// The selected block, normalized so r0 <= r1 and c0 <= c1.
     pub fn selection(&self) -> Range {
         Range {
