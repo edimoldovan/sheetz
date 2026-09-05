@@ -443,7 +443,7 @@ impl SheetzApp {
                 ui.label(format!("{} — {status}", client.name));
                 if client.path.exists() && !client.registered && ui.button("Connect").clicked() {
                     match crate::mcp::register::register_one(&client.path) {
-                        Ok(()) => self.set_status(format!(
+                        Ok(_) => self.set_status(format!(
                             "Connected to {}. Restart it to pick up Sheetz.",
                             client.name
                         )),

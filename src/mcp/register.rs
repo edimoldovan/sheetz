@@ -61,11 +61,30 @@ fn server_entry() -> Result<Value> {
     }))
 }
 
+/// True when this config already points at this exact binary — nothing to do.
+pub fn is_current(path: &PathBuf) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(root) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    match (root.pointer("/mcpServers/sheetz"), server_entry().ok()) {
+        (Some(existing), Some(wanted)) => *existing == wanted,
+        _ => false,
+    }
+}
+
 /// Adds (or refreshes) the `sheetz` entry in one client config.
 ///
-/// Only the one key is touched: everything else in the file is preserved, and
-/// the previous contents are kept as `<file>.bak`.
-pub fn register_one(path: &PathBuf) -> Result<()> {
+/// Only that one key is touched: every other setting is preserved, key order
+/// is kept (serde_json's `preserve_order`), and the previous contents are left
+/// as `<file>.bak`. Returns false when the entry was already correct, so
+/// startup registration is a no-op after the first run.
+pub fn register_one(path: &PathBuf) -> Result<bool> {
+    if is_current(path) {
+        return Ok(false);
+    }
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let mut root: Value = if existing.trim().is_empty() {
         json!({})
@@ -97,7 +116,20 @@ pub fn register_one(path: &PathBuf) -> Result<()> {
     }
     std::fs::write(path, serde_json::to_string_pretty(&root)?)
         .with_context(|| format!("could not write {}", path.display()))?;
-    Ok(())
+    Ok(true)
+}
+
+/// Registers with every installed client, quietly.
+///
+/// Called on app startup so that *running Sheetz* is the only thing a user
+/// ever has to do — no installer, no terminal, no editing JSON by hand. It
+/// rewrites nothing once the entry is correct.
+pub fn register_on_startup() {
+    for client in known_clients() {
+        if client.path.exists() {
+            let _ = register_one(&client.path);
+        }
+    }
 }
 
 /// Registers with every client config that already exists.
@@ -113,7 +145,8 @@ pub fn register_all() -> (Vec<String>, Vec<String>) {
             continue;
         }
         match register_one(&client.path) {
-            Ok(()) => done.push(client.name.to_string()),
+            Ok(true) => done.push(client.name.to_string()),
+            Ok(false) => done.push(format!("{} (already connected)", client.name)),
             Err(e) => skipped.push(format!("{}: {e}", client.name)),
         }
     }

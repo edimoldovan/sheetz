@@ -97,3 +97,38 @@ fn the_socket_path_is_absolute_and_user_specific() {
     assert!(path.is_absolute());
     assert!(path.to_string_lossy().contains("sheetz"));
 }
+
+/// The skill must carry frontmatter a client can index, and a description
+/// specific enough to trigger on real requests.
+#[test]
+fn the_skill_has_usable_frontmatter() {
+    let skill = std::fs::read_to_string("src/mcp/skill.rs").expect("skill source");
+    let start = skill.find("---\nname: sheetz").expect("frontmatter");
+    let body = &skill[start..];
+    assert!(body.contains("description: "), "needs a description");
+    let desc_line = body
+        .lines()
+        .find(|l| l.starts_with("description: "))
+        .unwrap();
+    assert!(
+        desc_line.len() > 120,
+        "the description decides whether the skill triggers; make it specific"
+    );
+    assert!(body.contains("spreadsheet"));
+}
+
+/// initialize must carry instructions: clients without skills still need to
+/// know how to drive this server.
+#[test]
+fn initialize_carries_instructions() {
+    let reply = sheetz::mcp::proto::handle_message(
+        &json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}).to_string(),
+    )
+    .expect("a reply");
+    let text = reply["result"]["instructions"]
+        .as_str()
+        .expect("instructions");
+    assert!(text.contains("workbook_info"), "should name the first call");
+    assert!(text.contains("table_append"), "should point at record tools");
+    assert!(text.len() > 200);
+}

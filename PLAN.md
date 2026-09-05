@@ -149,6 +149,17 @@ which is precisely the step being ruled out — so Sheetz does it:
       whether this instance is the primary, and which clients are registered,
       so "why can't Claude see my sheet?" is answerable without a terminal.
 - [x] `.mcp.json` in the repo for development use.
+- [x] **Registration happens at app startup** — running Sheetz is genuinely the
+      only requirement. No installer step, no `register` command needed, no
+      hand-edited JSON. Idempotent: once the entry is right nothing is
+      rewritten, key order is preserved and a `.bak` is kept.
+- [x] **A skill teaching the tools** — `~/.claude/skills/sheetz/SKILL.md`,
+      written at startup like the registration. Tool schemas say what the
+      arguments are; the skill says how to *work*: look before writing, prefer
+      records over coordinates, write formulas not constants, and leave undo,
+      backups, autosave and confirmations to Sheetz. The same guidance goes out
+      condensed as MCP `initialize` instructions, so clients without skills
+      still get it.
 
 ### Tools the assistant needs
 

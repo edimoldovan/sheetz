@@ -57,6 +57,19 @@ fn main() -> eframe::Result {
             app.mcp_rx = Some(rx);
             app.mcp_serving = mcp::proto::spawn_server().is_some();
 
+            // Tell assistants how to reach us. Doing this here is what makes
+            // "the app is running" the only requirement — no install step and
+            // no hand-edited JSON. It is a no-op once the entry is correct,
+            // and only the instance owning the socket does it.
+            if app.mcp_serving {
+                std::thread::spawn(|| {
+                    mcp::register::register_on_startup();
+                    // Teach the assistant how to work with a spreadsheet, not
+                    // just which calls exist.
+                    let _ = mcp::skill::install();
+                });
+            }
+
             Ok(Box::new(app))
         }),
     )

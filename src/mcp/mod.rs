@@ -8,5 +8,6 @@
 pub mod bridge;
 pub mod proto;
 pub mod register;
+pub mod skill;
 pub mod templates;
 pub mod tools;

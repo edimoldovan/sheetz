@@ -95,12 +95,21 @@ See [PLAN.md](PLAN.md) for the roadmap and what is still missing.
 
 ## Working with an assistant
 
-The server starts with the app — launching Sheetz any normal way, desktop
-launcher included, is all that is needed. There is no flag and no daemon.
+**Running Sheetz is the only requirement.** Start it any normal way — desktop
+launcher, file manager, anything — and it serves assistants and registers
+itself with the MCP clients it finds. No flag, no daemon, no install step, no
+JSON to edit. (Registering rewrites nothing once the entry is correct, and
+keeps a `.bak` the first time.)
 
-To let an assistant find it, open **File → Assistant** and press **Connect**
-(the installer does this too). That writes a `sheetz` entry into the client's
-config, keeping a `.bak` of the previous file; restart the client afterwards.
+On first run it also installs a skill at `~/.claude/skills/sheetz/SKILL.md`
+that teaches the assistant how to use those tools — look before writing, work
+in records rather than cell coordinates, write formulas rather than constants,
+and leave undo, backups and saving to Sheetz. The same guidance is sent as MCP
+`initialize` instructions for clients that have no skills.
+
+The one thing outside Sheetz's control: MCP clients read their config at
+startup, so a client that was already open needs restarting once to notice.
+**File → Assistant** shows the connection status for each client.
 
 Then just talk to it:
 

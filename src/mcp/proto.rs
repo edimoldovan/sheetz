@@ -111,6 +111,8 @@ pub fn handle_message(line: &str) -> Option<Value> {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "sheetz", "version": env!("CARGO_PKG_VERSION") },
+            // Clients surface this to the model before any tool is called.
+            "instructions": crate::mcp::skill::instructions(),
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools::definitions() })),
