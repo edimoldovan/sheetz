@@ -16,7 +16,7 @@ pub const CELL_PAD: f32 = 4.0;
 /// Width of the hit zone for dragging a header edge to resize.
 pub const RESIZE_GRAB: f32 = 4.0;
 
-/// Excel distinguishes these two modes: after typing into a cell, arrow keys
+/// Spreadsheets distinguish these two modes: after typing into a cell, arrow keys
 /// commit and move; after F2 (or double-click), they move the caret instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EditMode {

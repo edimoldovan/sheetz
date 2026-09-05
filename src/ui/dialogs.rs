@@ -68,7 +68,7 @@ fn hex(color: [u8; 3]) -> String {
     format!("#{:02X}{:02X}{:02X}", color[0], color[1], color[2])
 }
 
-/// Builds an Excel number-format code from the dialog's controls.
+/// Builds a number-format code from the dialog's controls.
 fn num_fmt_code(kind: usize, decimals: i32, custom: &str) -> String {
     let with_decimals = |base: &str| {
         if decimals <= 0 {
@@ -906,7 +906,7 @@ impl SheetzApp {
         });
     }
 
-    /// Excel-style status bar: selection stats on the right, zoom level.
+    /// Status bar: selection stats on the right, zoom level.
     pub fn status_bar(&mut self, ctx: &Context) {
         egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
             ui.horizontal(|ui| {

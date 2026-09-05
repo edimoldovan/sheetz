@@ -132,7 +132,7 @@ pub fn draw(painter: &Painter, rect: Rect, name: &str, color: Color32) -> bool {
 
         // ----- data -----
         "sort" => {
-            // Two opposed arrows, Excel's sort idiom.
+            // Two opposed arrows, the usual sort idiom.
             line((0.32, 0.86), (0.32, 0.24));
             arrow_head(0.32, 0.12, 0.0, -1.0, 0.16);
             line((0.68, 0.14), (0.68, 0.76));

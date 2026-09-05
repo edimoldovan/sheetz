@@ -1,12 +1,12 @@
 # Sheetz
 
-A fast, native, Excel-compatible spreadsheet for Linux. 100% Rust — no web
+A fast, native spreadsheet for Linux that reads and writes .xlsx. 100% Rust — no web
 runtime, no JavaScript, one binary.
 
 ## Stack
 
 - **[IronCalc](https://github.com/ironcalc/IronCalc)** — spreadsheet engine:
-  xlsx read/write, Excel formula language, dependency-graph recalculation,
+  xlsx read/write, the standard formula language, dependency-graph recalculation,
   styles, conditional formatting, undo/redo history.
 - **[egui](https://github.com/emilk/egui)** (via eframe) — GPU-rendered
   immediate-mode GUI. The grid paints only visible cells, so large sheets
@@ -47,8 +47,8 @@ One concern per module, so the pieces stay independently workable:
 
 ## Keyboard shortcuts
 
-Excel defaults, fully customizable. Bindings live in [keymap.toml](keymap.toml)
-and map chords to command ids:
+The familiar spreadsheet defaults, fully customizable. Bindings live in
+[keymap.toml](keymap.toml) and map chords to command ids:
 
 ```toml
 [bindings]
@@ -68,8 +68,8 @@ is `Command::from_id` in [commands.rs](src/commands.rs).
 Ctrl+Shift+Arrow to extend to the edge, Page Up/Down, Ctrl+Home/End, Go To
 (Ctrl+G) and a working Name Box.
 
-**Editing** — Excel's two edit modes (typing then arrow commits and moves; F2
-then arrow moves the caret), fill down/right with reference adjustment,
+**Editing** — two edit modes (typing then arrow commits and moves; F2 then
+arrow moves the caret), fill down/right with reference adjustment,
 formula-aware copy/paste that rewrites relative references, paste-values-only,
 undo/redo, Find & Replace across one sheet or the workbook.
 
@@ -98,10 +98,10 @@ See [PLAN.md](PLAN.md) for the parity roadmap and what is still missing.
   reading but has no write API yet. Existing merges from a file are rendered.
 - **Sorting moves formulas verbatim** — references inside sorted cells are not
   rewritten.
-- **No pivot tables, print/PDF, images, or macros** (see PLAN.md; VBA is an
-  explicit non-goal).
-- IronCalc implements a large subset of Excel's functions, not all of them.
-  Missing ones are best fixed upstream rather than worked around here.
+- **No pivot tables, print/PDF, images, or macros** (see PLAN.md; macro
+  language compatibility is an explicit non-goal).
+- IronCalc implements a large subset of the standard function set, not all of
+  it. Missing functions are best fixed upstream rather than worked around here.
 
 ## Tests
 

@@ -516,7 +516,7 @@ impl SheetzApp {
                 let sheet = self.sheet;
                 let down = fill.to_row - fill.origin.r1;
                 let right = fill.to_col - fill.origin.c1;
-                // Excel fills along whichever axis the pointer moved further on.
+                // Fill follows whichever axis the pointer moved further on.
                 let result = if down >= right && down > 0 {
                     self.engine.auto_fill_rows(sheet, fill.origin, fill.to_row)
                 } else if right > 0 {
@@ -965,7 +965,7 @@ mod tests {
     use super::column_name;
 
     #[test]
-    fn column_names_match_excel() {
+    fn column_names_follow_the_a1_convention() {
         assert_eq!(column_name(1), "A");
         assert_eq!(column_name(26), "Z");
         assert_eq!(column_name(27), "AA");

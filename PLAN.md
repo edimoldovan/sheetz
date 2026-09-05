@@ -1,8 +1,9 @@
-# Sheetz → Excel parity roadmap
+# Sheetz roadmap
 
-Guiding principle: parity in the order people actually use Excel. Roughly 90%
-of spreadsheet time is formatting, navigation, basic formulas, sort/filter,
-and charts — that's v0.2–v0.4. Pivot tables and automation are the long tail.
+Guiding principle: build features in the order people actually use a
+spreadsheet. Roughly 90% of the time goes on formatting, navigation, basic
+formulas, sort/filter and charts — that's v0.2–v0.4. Pivot tables and
+automation are the long tail.
 
 "IC" notes what the IronCalc engine already provides vs. what we build.
 
@@ -12,7 +13,7 @@ and charts — that's v0.2–v0.4. Pivot tables and automation are the long tail
       API), `state.rs` (app state), `app.rs` (update loop + command dispatch),
       `ui/{grid,ribbon,editor,dialogs,charts}.rs`. UI never imports ironcalc.
 - [x] **Command registry** — ~100 named commands, every one bindable.
-- [x] **Keymap** — full Excel default set in `keymap.toml`, plus an in-app
+- [x] **Keymap** — the full standard set in `keymap.toml`, plus an in-app
       shortcut viewer (F1).
 
 ## v0.2 — Looks like a spreadsheet (formatting & structure)
@@ -37,7 +38,7 @@ and charts — that's v0.2–v0.4. Pivot tables and automation are the long tail
 - [x] **Freeze panes** — frozen rows/columns painted as a pinned overlay with
       a stronger boundary line, and reported in the status bar.
 
-## v0.3 — Edits like Excel (clipboard, fill, find)
+## v0.3 — Edits like a spreadsheet should (clipboard, fill, find)
 
 - [x] **Formula-aware clipboard** — internal copy/paste keeps formulas, styles
       and adjusts relative references; cut marks the source; external apps
@@ -177,11 +178,12 @@ The point of doing this in a visible GUI is that the human stays in the loop.
 - [ ] **Images in sheets**
 - [ ] **Workbook protection**
 - [ ] **Goal seek**
-- [ ] **Scripting** — Rhai, not VBA. Explicit non-goal until the above ships.
+- [ ] **Scripting** — an embedded Rust scripting language (Rhai), not a
+      macro language clone. Explicit non-goal until the above ships.
 
 ## Engine parity track (continuous, upstream)
 
-IronCalc implements a large subset of Excel's ~500 functions. As we hit gaps
+IronCalc implements a large subset of the ~500 standard functions. As we hit gaps
 (XLOOKUP, dynamic arrays/spill, LAMBDA, …):
 
 1. Log the missing function in an issue here,
@@ -201,6 +203,7 @@ Same for xlsx fidelity bugs and for the missing merge-cells write API.
 
 ## Explicit non-goals
 
-VBA/macro compatibility, Power Query, real-time collaboration, cloud sync,
-add-in ecosystem. These are Microsoft-ecosystem moats, not spreadsheet
+Macro-language compatibility, query/ETL tooling, real-time collaboration,
+cloud sync, an add-in ecosystem. These are incumbent-ecosystem moats, not
+spreadsheet
 features; chasing them kills the project. KISS.

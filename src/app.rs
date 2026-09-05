@@ -141,7 +141,7 @@ impl SheetzApp {
         self.scroll_to_cursor = true;
     }
 
-    /// Excel Ctrl+Arrow: jump to the boundary of the current data region.
+    /// Ctrl+Arrow: jump to the boundary of the current data region.
     pub fn jump(&mut self, dr: i32, dc: i32, extend: bool) {
         let (ur, uc) = self.engine.used_range(self.sheet);
         let (r, c) = self.cursor;
@@ -563,7 +563,7 @@ impl SheetzApp {
 
     fn do_open(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Excel workbook", &["xlsx"])
+            .add_filter("Spreadsheet", &["xlsx"])
             .pick_file()
         {
             self.open_path(path);
@@ -589,7 +589,7 @@ impl SheetzApp {
 
     pub fn do_save_as(&mut self) -> bool {
         let Some(mut path) = rfd::FileDialog::new()
-            .add_filter("Excel workbook", &["xlsx"])
+            .add_filter("Spreadsheet", &["xlsx"])
             .set_file_name("Book1.xlsx")
             .save_file()
         else {
@@ -911,7 +911,7 @@ impl SheetzApp {
                 cmds.push(cmd);
             }
         }
-        // Ctrl+scroll zooms, like Excel.
+        // Ctrl+scroll zooms.
         let (scroll, ctrl) = ctx.input(|i| (i.raw_scroll_delta.y, i.modifiers.ctrl));
         if ctrl && scroll.abs() > 0.5 {
             cmds.push(if scroll > 0.0 {
@@ -921,7 +921,7 @@ impl SheetzApp {
             });
         }
         // Typing a printable character starts editing the active cell,
-        // replacing its content — Excel's "Enter mode".
+        // replacing its content — "Enter mode".
         if !typed.is_empty() && !typed.chars().all(char::is_control) {
             self.begin_edit(typed, EditMode::Enter);
         }
@@ -1006,7 +1006,7 @@ impl SheetzApp {
     }
 }
 
-/// One axis of Excel's Ctrl+Arrow "jump to data boundary".
+/// One axis of the Ctrl+Arrow "jump to data boundary" move.
 /// `far` is the sheet edge in that direction; `scan_end` is the last position
 /// worth scanning (the used range).
 fn jump_axis(start: i32, dir: i32, far: i32, scan_end: i32, filled: impl Fn(i32) -> bool) -> i32 {

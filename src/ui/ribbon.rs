@@ -1,4 +1,4 @@
-//! The Excel-style ribbon and the full-screen File (backstage) view.
+//! The ribbon and the full-screen File (backstage) view.
 
 use std::path::PathBuf;
 
@@ -12,7 +12,7 @@ use crate::engine::StyleEdit;
 use crate::state::{Dialog, Pending, RibbonTab, SheetzApp};
 use crate::ui::rgb;
 
-/// Excel's "standard colors"; the palette's hue rows are tints/shades of these.
+/// The standard color set; the palette's hue rows are tints/shades of these.
 const PALETTE_HUES: [[u8; 3]; 10] = [
     [192, 0, 0],
     [255, 0, 0],
@@ -287,7 +287,7 @@ impl SheetzApp {
         }
     }
 
-    /// A ribbon dropdown listing commands, Excel style. Keeps the tab compact:
+    /// A ribbon dropdown listing commands. Keeps the tab compact:
     /// related actions live one click down instead of each taking a button.
     fn ribbon_menu(
         &self,
@@ -757,7 +757,7 @@ impl SheetzApp {
             ui.label(format!("Keymap: {}", self.keymap.source));
             ui.label(
                 egui::RichText::new(
-                    "Edit keymap.toml to customize shortcuts (Excel defaults built in).",
+                    "Edit keymap.toml to customize shortcuts (standard defaults built in).",
                 )
                 .weak()
                 .small(),

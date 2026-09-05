@@ -78,7 +78,7 @@ impl SheetzApp {
                     .map(|e| e.in_formula_bar)
                     .unwrap_or(false);
 
-                // Excel's cancel / enter buttons, between name box and formula.
+                // Cancel / enter buttons, between the name box and the formula.
                 if ui
                     .add_enabled(editing_here, egui::Button::new("✗"))
                     .on_hover_text("Cancel")
@@ -103,8 +103,8 @@ impl SheetzApp {
                     self.handle_f4(ctx);
                     popup = self.completion_keys(ctx);
                     // The bar is multiline, so Enter would insert a newline
-                    // unless we take it first — except with Alt, which is how
-                    // Excel adds a line break.
+                    // unless we take it first — except with Alt, which is the
+                    // line-break chord.
                     let (shift, alt) = ctx.input(|i| (i.modifiers.shift, i.modifiers.alt));
                     if !popup && !alt {
                         ctx.input_mut(|i| {
@@ -235,8 +235,8 @@ impl SheetzApp {
                     resp.request_focus();
                 }
 
-                // In Enter mode (started by typing), arrows commit and move —
-                // Excel's behavior. In Edit mode (F2) they move the caret.
+                // In Enter mode (started by typing), arrows commit and move.
+                // In Edit mode (F2) they move the caret.
                 // While the completion list is up it owns the arrows instead.
                 if edit.mode == EditMode::Enter && !popup {
                     let (up, down, left, right) = ui.input(|i| {
@@ -493,7 +493,7 @@ impl SheetzApp {
         edit.is_formula() && reference_slot(&edit.text, caret_pos()).is_some()
     }
 
-    /// Inserts (or, in Excel's point mode, replaces) a reference to the clicked
+    /// Inserts (or, in point mode, replaces) a reference to the clicked
     /// cell. Returns true if the click was consumed.
     pub fn insert_reference_at_caret(&mut self, row: i32, col: i32) -> bool {
         let reference = format!("{}{}", column_name(col), row);
@@ -621,7 +621,7 @@ fn reference_slot(text: &str, caret: usize) -> Option<(usize, usize)> {
         return Some((caret, caret));
     }
     // At the end of the formula a trailing reference is replaced, the way
-    // Excel's point mode does it.
+    // point mode does it.
     if caret == chars.len() {
         let mut start = caret;
         while start > 0 && (chars[start - 1].is_ascii_alphanumeric() || chars[start - 1] == '$') {

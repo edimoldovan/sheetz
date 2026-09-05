@@ -13,7 +13,7 @@ use ironcalc::base::UserModel;
 use ironcalc::export::save_xlsx_to_writer;
 use ironcalc::import::load_from_xlsx;
 
-/// Excel sheet limits.
+/// Sheet limits, as the xlsx format defines them.
 pub const MAX_ROWS: i32 = 1_048_576;
 pub const MAX_COLS: i32 = 16_384;
 
@@ -877,7 +877,7 @@ impl Engine {
 
     // ----- fill -----
 
-    /// Excel-style fill: extends the top row of `src` down to `to_row`,
+    /// Series fill: extends the top row of `src` down to `to_row`,
     /// adjusting relative references.
     pub fn auto_fill_rows(&mut self, sheet: u32, src: Range, to_row: i32) -> Result<()> {
         self.um
@@ -937,7 +937,7 @@ impl Engine {
         out
     }
 
-    /// Excel F4: cycle the reference under the cursor through $ variants.
+    /// F4: cycle the reference under the cursor through its $ variants.
     pub fn cycle_reference(&self, text: &str, start: usize, end: usize) -> Option<(String, usize)> {
         let (new_text, _s, e) = self.um.cycle_reference(text, start, end).ok()?;
         Some((new_text, e.max(0) as usize))
@@ -1149,7 +1149,7 @@ impl Engine {
 }
 
 /// Orders two displayed cell values: numbers numerically, blanks last, the
-/// rest case-insensitively — matching Excel's sort.
+/// rest case-insensitively — the usual spreadsheet ordering.
 fn compare_cells(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (a.is_empty(), b.is_empty()) {

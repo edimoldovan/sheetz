@@ -1,4 +1,4 @@
-# Sheetz key bindings — Excel-compatible defaults.
+# Sheetz key bindings — the familiar spreadsheet defaults.
 #
 # Format:  "Chord" = "command_id"
 # Chords are Modifier+Key, e.g. "Ctrl+Shift+S". Modifiers: Ctrl, Shift, Alt.
@@ -31,7 +31,7 @@
 "Ctrl+G" = "goto_cell"
 "F5" = "goto_cell"
 
-# Jump to edge of data region (Excel Ctrl+Arrow)
+# Jump to edge of data region (Ctrl+Arrow)
 "Ctrl+ArrowUp" = "jump_up"
 "Ctrl+ArrowDown" = "jump_down"
 "Ctrl+ArrowLeft" = "jump_left"
